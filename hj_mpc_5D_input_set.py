@@ -13,7 +13,7 @@ from matplotlib.animation import FuncAnimation
 
 def get_value_function():
     # Import value function from file
-    file_path = os.path.join(os.path.dirname(__file__), "out1_old.npy")
+    file_path = "pyspect_test/hjb_mpc/out_bicycle5d.npy"
     return np.load(file_path)
 
 class MPC_casadi:
@@ -363,7 +363,7 @@ class MPC_casadi:
 
     def set_value_function(self):
         # Import value function from file
-        file_path = os.path.join(os.path.dirname(__file__), "out1_old.npy")
+        file_path = "pyspect_test/hjb_mpc/out_bicycle5d.npy"
         self.value_function = np.load(file_path)
         self.dims = self.value_function.shape
         print("Loaded value function of type",type(self.value_function),"of shape",self.dims)
@@ -1045,7 +1045,7 @@ def animate_heat_map_input(Car, states, inputs, nr, predicted_inputs = None):
 def main():
     V = get_value_function()
 
-    states = [[0, 1.25, -1, np.pi, 0.0, 0.0]]
+    states = [[0, 0.25, 0.5, 0.0, 0.0, 0.0]]
     nr = 120
     tot_it = 120
 

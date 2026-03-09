@@ -12,7 +12,7 @@ from matplotlib.animation import FuncAnimation
 
 def get_value_function():
     # Import value function from file
-    file_path = os.path.join(os.path.dirname(__file__), "out1_old.npy")
+    file_path = "pyspect_test/hjb_mpc/out_bicycle5d.npy"
     return np.load(file_path)
 
 class MPC_casadi:
@@ -174,8 +174,10 @@ class MPC_casadi:
         self.computation_times[it,1] = solve_V_end - solve_V_start
         # self.V_grad = self.interpolate_gradient_segment([HJ_time] + state, self.current_horizon)
 
+        set_obj_start = tm.time()
         self.set_objective_function(HJ_time)
         self.opti.set_value(self.x_init, bounded_state)
+        set_obj_end = tm.time()
 
         solver_start = tm.time()
         # Extract control actions (acceleration and steering rate)
@@ -199,6 +201,7 @@ class MPC_casadi:
         comp_end = tm.time()
         self.computation_times[it][0] = comp_end - comp_start
 
+        print(f"Total time: {self.computation_times[it][0]:.4f} s, V time: {self.computation_times[it][1]:.4f} s, Set objective time: {set_obj_end - set_obj_start:.4f} s, Solve time: {self.computation_times[it][2]:.4f} s")
         return acceleration, steering_rate
 
     def get_optimal_control(self, all=True):
@@ -337,7 +340,7 @@ class MPC_casadi:
 
     def set_value_function(self):
         # Import value function from file
-        file_path = os.path.join(os.path.dirname(__file__), "out1_old.npy")
+        file_path = "pyspect_test/hjb_mpc/out_bicycle5d.npy"
         self.value_function = np.load(file_path)
         self.dims = self.value_function.shape
         print("Loaded value function of type",type(self.value_function),"of shape",self.dims)
@@ -347,7 +350,7 @@ class MPC_casadi:
         This intepolates a segment depending on the current state, prediction horizon and allowed marginal\n
         """
         delta_plus  = [horizon, horizon, horizon, horizon, 3, 10]
-        delta_minus = [      2, horizon, horizon, horizon, 3, 10]
+        delta_minus = [      0, horizon, horizon, horizon, 3, 10]
         index = list(self.coord_to_index(state))
         index[3] = index[3] + self.dims[3]
         indices = [[max(0,index[i]-delta_minus[i]), min(self.dims[i],index[i]+delta_plus[i])] for i in range(6)]
@@ -363,7 +366,9 @@ class MPC_casadi:
         self.grids_segment_list.append(self.grids_segment[:][:][:][:][:][:])
 
         # Create CasADi interpolation function
-        return ca.interpolant("reachability_cost_segment", "linear", self.grids_segment, value_func_segment.ravel(order="F"))  # Column-major flattening
+        interpolant = ca.interpolant("reachability_cost_segment", "linear", self.grids_segment, value_func_segment.ravel(order="F"))  # Column-major flattening
+        # print(f"Interpolated result {interpolant}")
+        return interpolant
 
     def interpolate_gradient_segment(self, current_state, horizon):
         """
@@ -618,7 +623,7 @@ def plot_comp_time(Car):
     ax.legend()
     fig.savefig("a_time_5D.png", dpi=300)
 
-def animate_heat_map(Car, states, V, nr, predicted_path):
+def animate_heat_map(Car, states, V, nr, predicted_path, costs_list=None):
     '''
     Animates the states of the car in two separate heatmaps.\n
     Shows the state, predicted states and the bound between positive and negative values in value function
@@ -631,8 +636,12 @@ def animate_heat_map(Car, states, V, nr, predicted_path):
     grids = [np.linspace(Car.min_bounds_state[i], Car.max_bounds_state[i], dims[i]) for i in range(6)]
     V_interpolated = ca.interpolant("V_interp", "linear", grids, V.ravel(order="F"))
 
-    # Create a figure for animation
-    fig, (ax, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+    # Create a figure for animation: 2x2 grid, last subplot spans bottom-right for cost
+    fig = plt.figure(figsize=(18, 10))
+    ax  = fig.add_subplot(2, 3, 1)
+    ax2 = fig.add_subplot(2, 3, 2)
+    ax3 = fig.add_subplot(2, 3, 3)
+    ax4 = fig.add_subplot(2, 1, 2)   # Time vs Cost — full bottom row
 
     print("Creating animation frames")
     progress = tqdm(total=nr)
@@ -708,25 +717,49 @@ def animate_heat_map(Car, states, V, nr, predicted_path):
         ax3.plot(predicted_path[index_t][2], predicted_path[index_t][4], "yo")
         ax3.plot(theta, delta, "ro")
 
+        # ---------- Time vs Cost subplot ----------
+        ax4.clear()
+        if costs_list is not None:
+            time_axis = np.arange(len(costs_list)) * Car.dt
+            # Current-state cost (index 0 of each entry = V at current state)
+            current_costs = [c[0] for c in costs_list]
+            ax4.plot(time_axis, current_costs, color='steelblue', linewidth=1.5, label='V(current state)')
+            ax4.axhline(0, color='black', linestyle='--', linewidth=1)
+            # Highlight the current frame
+            if index_t < len(costs_list):
+                ax4.axvline(time_axis[index_t], color='red', linestyle='--', linewidth=1.5, label=f't = {time_axis[index_t]:.2f} s')
+                ax4.plot(time_axis[index_t], current_costs[index_t], 'ro', markersize=7)
+            ax4.set_xlabel('Time (s)')
+            ax4.set_ylabel('HJ Value V(x)')
+            ax4.set_title('Time vs HJ Cost (V ≤ 0 = safe)')
+            ax4.legend(loc='upper right', fontsize=8)
+            ax4.grid(True, alpha=0.4)
+        # ------------------------------------------
+
         progress.update(1)
         return c, c2, c3
 
     # Create animation
     ani = FuncAnimation(fig, update, frames=range(0, nr), interval=100, blit=False)
+    fig.tight_layout()
     
     # Save animation as a gif
     ani.save("animation_5D.gif", writer="pillow", fps=10)
     progress.close()
 
-def animate_heat_map_segment(Car, states, nr, predicted_path):
+def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None):
     '''
     Animates the states of the car in two separate heatmaps.\n
     Shows the state, predicted states, the bound between positive and negative values in value function and the bounded square in which the interpolation takes place
     '''
     print("Animating heat map for interpolation segmentation")
 
-    # Create a figure for animation
-    fig, (ax, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+    # Create a figure for animation: top row = 3 heatmaps, bottom = time vs cost
+    fig = plt.figure(figsize=(18, 10))
+    ax  = fig.add_subplot(2, 3, 1)
+    ax2 = fig.add_subplot(2, 3, 2)
+    ax3 = fig.add_subplot(2, 3, 3)
+    ax4 = fig.add_subplot(2, 1, 2)   # Time vs Cost — full bottom row
 
     print("Creating animation frames")
     progress = tqdm(total=nr)
@@ -813,11 +846,33 @@ def animate_heat_map_segment(Car, states, nr, predicted_path):
         ax3.plot([seg[index_t][3][0], seg[index_t][3][-1],seg[index_t][3][-1], seg[index_t][3][0], seg[index_t][3][0]],
                  [seg[index_t][5][0], seg[index_t][5][0], seg[index_t][5][-1], seg[index_t][5][-1],seg[index_t][5][0]],"y")
 
+        ax.text(0.02, 0.02, f"Iteration: {index_t}", transform=ax.transAxes,
+                fontsize=12, color="white", va="bottom", ha="left",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="black", alpha=0.5))
+
+        # ---------- Time vs Cost subplot ----------
+        ax4.clear()
+        if costs_list is not None:
+            time_axis = np.arange(len(costs_list)) * Car.dt
+            current_costs = [c[0] for c in costs_list]
+            ax4.plot(time_axis, current_costs, color='steelblue', linewidth=1.5, label='V(current state)')
+            ax4.axhline(0, color='black', linestyle='--', linewidth=1)
+            if index_t < len(costs_list):
+                ax4.axvline(time_axis[index_t], color='red', linestyle='--', linewidth=1.5, label=f't = {time_axis[index_t]:.2f} s')
+                ax4.plot(time_axis[index_t], current_costs[index_t], 'ro', markersize=7)
+            ax4.set_xlabel('Time (s)')
+            ax4.set_ylabel('HJ Value V(x)')
+            ax4.set_title('Time vs HJ Cost (V ≤ 0 = safe)')
+            ax4.legend(loc='upper right', fontsize=8)
+            ax4.grid(True, alpha=0.4)
+        # ------------------------------------------
+
         progress.update(1)
         return c, c2, c3
 
     # Create animation
     ani = FuncAnimation(fig, update, frames=range(0, nr), interval=100, blit=False)
+    fig.tight_layout()
     
     # Save animation as a gif
     ani.save("animation_seg_5D.gif", writer="pillow", fps=10)
@@ -829,7 +884,7 @@ def main():
     # nr = 100
     nr = 120
     Car = MPC_casadi(nr)
-    states = [[0, 1.75, -1.25, np.pi, 0.0, 0.0]]
+    states = [[0, 0.25, 0.5, 0.0, 0.0, 0.0]]
     # states = [[0, 1.75, -1.25, -np.pi/2, 0, 0.0]]
     predicted_path = []
     predicted_input = []
@@ -863,8 +918,8 @@ def main():
     # plot_input(Car, predicted_input)
     # plot_cost(Car, costs_list)
     # plot_comp_time(Car)
-    # animate_heat_map(Car, states, V, nr, predicted_path)
-    animate_heat_map_segment(Car, states, nr, predicted_path)
+    # animate_heat_map(Car, states, V, nr, predicted_path, costs_list)
+    animate_heat_map_segment(Car, states, nr, predicted_path, costs_list)
     plt.show()
 
 main()

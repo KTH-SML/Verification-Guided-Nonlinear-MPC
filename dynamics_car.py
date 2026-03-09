@@ -81,7 +81,7 @@ steering_rate_max = 180
 
 # The min/max velocity allowed for SVEA (unit [m/s^2])
 velocity_min = 0.0
-velocity_max = 0.2
+velocity_max = 1.5
 
 # The min/max acceleration allowed for SVEA (unit [m/s^2])
 acceleration_min = -0.2
