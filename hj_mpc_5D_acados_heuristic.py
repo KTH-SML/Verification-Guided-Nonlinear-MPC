@@ -45,7 +45,7 @@ HJ_STAGE_PARAM_DIM = 32
 # ---------------------------------------------------------------------------
 
 def get_value_function():
-    file_path = 'pyspect_test/hjb_mpc/out_bicycle5d.npy' # "pyspect_test/hjb_mpc/out_bicycle5d.npy"
+    file_path = 'pyspect_test/hjb_mpc/out_thick_mov.npy' # "pyspect_test/hjb_mpc/out_bicycle5d.npy"
     return np.load(file_path)
 
 
@@ -55,8 +55,8 @@ def get_value_function():
 
 class MPC_acados:
 
-    X0, XN = -2, 4
-    Y0, YN = -2, 4
+    X0, XN = 0, 4
+    Y0, YN = 0, 4
 
     def __init__(self, nr, vehicle_name='', config_ns='~mpc'):
         """
@@ -336,11 +336,9 @@ class MPC_acados:
         # _build_all_stage_params_batched assembles all finite-difference query
         # points for every stage into a single array and issues one self.V() call,
         # reducing O(N * n_pts) individual Python->C RGI invocations to O(1).
-        surrogate_start = tm.time()
         all_params = self._build_all_stage_params_batched(x_pred, HJ_time)
         for k in range(self.N + 1):
             self.acados_solver.set(k, "p", all_params[k])
-        surrogate_end = tm.time()
 
         # --- Warm-start from previous solution --------------------------------
         if self._sol is not None:
@@ -384,7 +382,7 @@ class MPC_acados:
         comp_end = tm.time()
         self.computation_times[it, 0] = comp_end - comp_start
 
-        print(f"Total Computation time: {self.computation_times[it, 0]:.4f} s, HJ surrogate time: {surrogate_end - surrogate_start:.4f} s")
+        # print(f"Total Computation time: {self.computation_times[it, 0]:.4f} s, HJ surrogate time: {surrogate_end - surrogate_start:.4f} s")
 
         return acceleration, steering_rate
 
@@ -410,7 +408,7 @@ class MPC_acados:
     # =========================================================================
 
     def set_value_function(self):
-        file_path = "pyspect_test/hjb_mpc/out_bicycle5d.npy"
+        file_path = "pyspect_test/hjb_mpc/out_thick_mov.npy"
         self.value_function = np.load(file_path)
         self.dims = self.value_function.shape
         print("Loaded value function of type", type(self.value_function),
@@ -428,7 +426,7 @@ class MPC_acados:
         (M, 6), columns ordered [t, x, y, theta, v, delta].
         """
         delta_plus  = [horizon, horizon, horizon, horizon, 5, 12]
-        delta_minus = [      0, horizon, horizon, horizon, 5, 12]
+        delta_minus = [      2, horizon, horizon, horizon, 5, 12]
 
         index = list(self.coord_to_index(state))
         index[3] = index[3] + self.dims[3]
@@ -479,12 +477,6 @@ class MPC_acados:
             fill_value=None
         )
 
-        # ── Update cache ──────────────────────────────────────────────────────
-        self._V_cached_indices     = indices
-        self._V_cached_interpolant = interpolant
-        self._V_cached_grids       = grids_segment
-        # ─────────────────────────────────────────────────────────────────────
-
         return interpolant
 
     def _pack_upper_triangle(self, H):
@@ -493,114 +485,6 @@ class MPC_acados:
             for j in range(i, 5):
                 vals.append(H[i, j])
         return np.array(vals, dtype=float)
-
-    def _build_local_hj_surrogate(self, zbar, t0):
-        """
-        Build local HJ surrogate coefficients around zbar at time t0
-        using finite differences on the external interpolant self.V.
-
-        NOTE: This single-stage version is kept for reference / debugging.
-              The hot path in compute_control uses _build_all_stage_params_batched
-              which amortises all RGI calls across the full horizon in one shot.
-        """
-        zbar = np.asarray(zbar, dtype=float)
-        eps = np.array([
-            max(1e-3, 0.5 * self.d_states[1]),  # x
-            max(1e-3, 0.5 * self.d_states[2]),  # y
-            max(1e-3, 0.5 * self.d_states[3]),  # theta
-            max(1e-3, 0.5 * self.d_states[4]),  # v
-            max(1e-3, 0.5 * self.d_states[5]),  # delta
-        ], dtype=float)
-
-        def eval_V(z):
-            pt = np.concatenate(([t0], z))
-            return float(self.V(pt.reshape(1, -1))[0])
-
-        a_hj = eval_V(zbar)
-
-        g_hj = np.zeros(5, dtype=float)
-        for i in range(5):
-            dz = np.zeros(5, dtype=float)
-            dz[i] = eps[i]
-            vp = eval_V(zbar + dz)
-            vm = eval_V(zbar - dz)
-            g_hj[i] = (vp - vm) / (2.0 * eps[i])
-
-        hdiag = np.zeros(5, dtype=float)
-        for i in range(5):
-            dz = np.zeros(5, dtype=float)
-            dz[i] = eps[i]
-            vp = eval_V(zbar + dz)
-            vm = eval_V(zbar - dz)
-            hdiag[i] = (vp - 2.0 * a_hj + vm) / (eps[i] ** 2)
-
-        H_full = np.zeros((5, 5), dtype=float)
-        np.fill_diagonal(H_full, hdiag)
-
-        for i in range(5):
-            for j in range(i + 1, 5):
-                dzi = np.zeros(5, dtype=float)
-                dzj = np.zeros(5, dtype=float)
-                dzi[i] = eps[i]
-                dzj[j] = eps[j]
-
-                vpp = eval_V(zbar + dzi + dzj)
-                vpm = eval_V(zbar + dzi - dzj)
-                vmp = eval_V(zbar - dzi + dzj)
-                vmm = eval_V(zbar - dzi - dzj)
-
-                hij = (vpp - vpm - vmp + vmm) / (4.0 * eps[i] * eps[j])
-                H_full[i, j] = hij
-                H_full[j, i] = hij
-
-        H_full = 0.5 * (H_full + H_full.T)
-
-        # ------------------------------------------------------------------
-        # Positive-semidefinite regularisation (Method A)
-        # ------------------------------------------------------------------
-        # hdiag: clamp negative curvature entries to zero.
-        # Negative values arise when V is locally flat (safe region interior),
-        # causing an indefinite Hessian contribution that makes HPIPM fail
-        # with ACADOS_MINSTEP (status 3 / 4).
-        hdiag = np.maximum(hdiag, 0.0)
-
-        # H_full: shift by the magnitude of the most-negative eigenvalue so
-        # the matrix is at least positive-semidefinite (Gill-Murray shift).
-        eigvals = np.linalg.eigvalsh(H_full)
-        min_eig = eigvals.min()
-        if min_eig < 0.0:
-            H_full += (-min_eig + 1e-4) * np.eye(5)
-
-        return a_hj, g_hj, hdiag, H_full
-
-    def _pack_hj_stage_params(self, zbar, t0):
-        """
-        Build one stage parameter vector:
-        p = [lam, zbar(5), a, g(5), hdiag(5), H_upper(15)].
-
-        NOTE: Single-stage version kept for reference / debugging.
-              Hot path uses _build_all_stage_params_batched.
-        """
-        a_hj, g_hj, hdiag, H_full = self._build_local_hj_surrogate(zbar, t0)
-
-        p = np.zeros(HJ_STAGE_PARAM_DIM, dtype=float)
-        p[0] = self.hj_lambda
-        p[1:6] = np.asarray(zbar, dtype=float)
-        p[6] = a_hj
-
-        if USE_HJ_LINEAR:
-            p[7:12] = g_hj
-        elif USE_HJ_DIAG_QUADRATIC:
-            p[7:12] = g_hj
-            p[12:17] = hdiag
-        elif USE_HJ_FULL_QUADRATIC:
-            p[7:12] = g_hj
-            p[12:17] = hdiag
-            p[17:32] = self._pack_upper_triangle(H_full)
-        else:
-            raise RuntimeError("No HJ surrogate mode selected.")
-
-        return p
 
     def _build_all_stage_params_batched(self, x_pred, HJ_time):
         """
@@ -909,8 +793,12 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None):
         ])
         Z_xy = V_interpolated_seg(pts_xy).reshape(100, 100)
 
-        c = ax.contourf(x_vals, y_vals, Z_xy.T, levels=50, cmap="viridis")
-        ax.contour(x_vals, y_vals, Z_xy.T, levels=10, colors="black", linewidths=0.5)
+        _zmin_xy, _zmax_xy = Z_xy.min(), Z_xy.max()
+        if _zmax_xy - _zmin_xy > 1e-10:
+            c = ax.contourf(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 50), cmap="viridis")
+            ax.contour(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 10), colors="black", linewidths=0.5)
+        else:
+            c = ax.contourf(x_vals, y_vals, Z_xy.T, levels=1, cmap="viridis")
         if Z_xy.max() > 0 and Z_xy.min() < 0:
             ax.contour(x_vals, y_vals, Z_xy.T, levels=[0], colors="red", linewidths=2.0)
         ax.set_xlabel('X-axis');  ax.set_ylabel('Y-axis')
@@ -929,8 +817,12 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None):
         ])
         Z_tv = V_interpolated_seg(pts_tv).reshape(100, 100)
 
-        c2 = ax2.contourf(theta_vals, v_vals, Z_tv.T, levels=50, cmap="viridis")
-        ax2.contour(theta_vals, v_vals, Z_tv.T, levels=10, colors="black", linewidths=0.5)
+        _zmin_tv, _zmax_tv = Z_tv.min(), Z_tv.max()
+        if _zmax_tv - _zmin_tv > 1e-10:
+            c2 = ax2.contourf(theta_vals, v_vals, Z_tv.T, levels=np.linspace(_zmin_tv, _zmax_tv, 50), cmap="viridis")
+            ax2.contour(theta_vals, v_vals, Z_tv.T, levels=np.linspace(_zmin_tv, _zmax_tv, 10), colors="black", linewidths=0.5)
+        else:
+            c2 = ax2.contourf(theta_vals, v_vals, Z_tv.T, levels=1, cmap="viridis")
         if Z_tv.max() > 0 and Z_tv.min() < 0:
             ax2.contour(theta_vals, v_vals, Z_tv.T, levels=[0], colors="red", linewidths=2.0)
         ax2.set_xlabel('Theta');  ax2.set_ylabel('Velocity')
@@ -948,8 +840,12 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None):
         ])
         Z_td = V_interpolated_seg(pts_td).reshape(100, 100)
 
-        c3 = ax3.contourf(theta_vals, delta_vals, Z_td.T, levels=50, cmap="viridis")
-        ax3.contour(theta_vals, delta_vals, Z_td.T, levels=10, colors="black", linewidths=0.5)
+        _zmin_td, _zmax_td = Z_td.min(), Z_td.max()
+        if _zmax_td - _zmin_td > 1e-10:
+            c3 = ax3.contourf(theta_vals, delta_vals, Z_td.T, levels=np.linspace(_zmin_td, _zmax_td, 50), cmap="viridis")
+            ax3.contour(theta_vals, delta_vals, Z_td.T, levels=np.linspace(_zmin_td, _zmax_td, 10), colors="black", linewidths=0.5)
+        else:
+            c3 = ax3.contourf(theta_vals, delta_vals, Z_td.T, levels=1, cmap="viridis")
         if Z_td.max() > 0 and Z_td.min() < 0:
             ax3.contour(theta_vals, delta_vals, Z_td.T, levels=[0], colors="red", linewidths=2.0)
         ax3.set_xlabel('Theta');  ax3.set_ylabel('Delta')
@@ -999,7 +895,14 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None):
 
     ani = FuncAnimation(fig, update, frames=range(nr), interval=100, blit=False)
     fig.tight_layout()
-    ani.save("animation_seg_5D_acados_heuristic.gif", writer="pillow", fps=10)
+    if USE_HJ_LINEAR:
+        ani.save("animation_seg_5D_acados_heuristic_linear.gif", writer="pillow", fps=10)
+    elif USE_HJ_DIAG_QUADRATIC:
+        ani.save("animation_seg_5D_acados_heuristic_diagonal.gif", writer="pillow", fps=10)
+    elif USE_HJ_FULL_QUADRATIC:
+        ani.save("animation_seg_5D_acados_heuristic_full.gif", writer="pillow", fps=10)
+    else:
+        raise RuntimeError("No HJ surrogate mode selected.")
     progress.close()
 
 
@@ -1008,10 +911,10 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None):
 # ===========================================================================
 
 def main():
-    nr  = 120
+    nr  = 200
     Car = MPC_acados(nr)
 
-    states          = [[0, 0.25, 0.5, 0.0, 0.0, 0.0]]
+    states          = [[0, 3.0, 0.5, np.pi/2, 0.0, 0.0]]
     predicted_path  = []
     predicted_input = []
     costs_list      = []

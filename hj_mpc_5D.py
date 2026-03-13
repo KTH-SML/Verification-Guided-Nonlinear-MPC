@@ -12,13 +12,13 @@ from matplotlib.animation import FuncAnimation
 
 def get_value_function():
     # Import value function from file
-    file_path = "pyspect_test/hjb_mpc/out_bicycle5d.npy"
+    file_path = "pyspect_test/hjb_mpc/out_thin.npy"
     return np.load(file_path)
 
 class MPC_casadi:
 
-    X0, XN = -2, 4
-    Y0, YN = -2, 4
+    X0, XN = 0, 4
+    Y0, YN = 0, 4
 
     def __init__(self, nr, vehicle_name='', config_ns='~mpc'):
         """
@@ -340,7 +340,7 @@ class MPC_casadi:
 
     def set_value_function(self):
         # Import value function from file
-        file_path = "pyspect_test/hjb_mpc/out_bicycle5d.npy"
+        file_path = "pyspect_test/hjb_mpc/out_thin.npy"
         self.value_function = np.load(file_path)
         self.dims = self.value_function.shape
         print("Loaded value function of type",type(self.value_function),"of shape",self.dims)
@@ -884,7 +884,7 @@ def main():
     # nr = 100
     nr = 120
     Car = MPC_casadi(nr)
-    states = [[0, 0.25, 0.5, 0.0, 0.0, 0.0]]
+    states = [[0, 3.0, 0.5, np.pi/2, 0.0, 0.0]]
     # states = [[0, 1.75, -1.25, -np.pi/2, 0, 0.0]]
     predicted_path = []
     predicted_input = []

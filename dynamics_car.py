@@ -4,10 +4,10 @@
 
 ## Core Parameters
 # The time step in which the optimization problem is divided (unit [s])
-time_step = 0.2
+time_step = 0.1
 
 # The prediction horizon steps for the mpc optimization problem
-prediction_horizon = 3
+prediction_horizon = 5
 
 ## Objective Function J
 
@@ -64,7 +64,7 @@ forward_speed_weight = 0
 steering_weight = 0.0
 
 # Qhj
-reachability_set_weight = 1.0
+reachability_set_weight = 10.0
 
 #Qg
 gradient_weight = 0.0
@@ -76,16 +76,16 @@ steering_min = -40
 steering_max = 40
 
 # The min/max steering rate allowed for SVEA (unit [degrees/s])
-steering_rate_min = -180 
+steering_rate_min = -180
 steering_rate_max = 180
 
 # The min/max velocity allowed for SVEA (unit [m/s^2])
 velocity_min = 0.0
-velocity_max = 1.5
+velocity_max = 0.8
 
 # The min/max acceleration allowed for SVEA (unit [m/s^2])
-acceleration_min = -0.2
-acceleration_max = 0.2
+acceleration_min = -0.8
+acceleration_max = 0.8
 
 # The wheelbase of the vehicle (unit [m]).
 wheelbase = 0.32
