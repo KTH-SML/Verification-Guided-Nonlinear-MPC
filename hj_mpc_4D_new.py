@@ -91,7 +91,6 @@ class MPC_acados:
         # ----- Value function --------------------------------------------------
         start_load = tm.time()
         self.set_value_function()
-        self.dims = self.value_function.shape
         end_load = tm.time()
 
         # Theta wrap-around is handled lazily in interpolate_V_segment via
@@ -289,12 +288,12 @@ class MPC_acados:
 
     def compute_control(self, state, HJ_time, it):
         """
-        Compute optimal (acceleration, steering_rate) using acados SQP_RTI.
+        Compute optimal (acceleration, steering) using acados SQP_RTI.
 
         :param state:   [x, y, theta, v, delta]
         :param HJ_time: HJ 'time-to-go' for the current state (scalar)
         :param it:      iteration index for bookkeeping
-        :return:        (acceleration, steering_rate)
+        :return:        (acceleration, steering)
         """
         self.iteration = it
         comp_start = tm.time()
@@ -348,7 +347,7 @@ class MPC_acados:
             self._sol = None
             self.acados_solver.reset()
             acceleration  = 0.0
-            steering_rate = 0.0
+            steering = 0.0
         else:
             if status not in (0, 1):
                 print(f"[acados] Warning: solver returned status {status} at iter {it}")
@@ -356,7 +355,7 @@ class MPC_acados:
             # Extract first control
             u0            = self.acados_solver.get(0, "u")
             acceleration  = float(u0[0])
-            steering_rate = float(u0[1])
+            steering = float(u0[1])
 
             # Cache solution for warm-starting
             self._sol = {
@@ -369,7 +368,7 @@ class MPC_acados:
 
         # print(f"Total Computation time: {self.computation_times[it, 0]:.4f} s, HJ surrogate time: {surrogate_end - surrogate_start:.4f} s")
 
-        return acceleration, steering_rate
+        return acceleration, steering
 
     # =========================================================================
     # Solution accessors (mirror CasADi API used by main())
@@ -394,8 +393,10 @@ class MPC_acados:
 
     def set_value_function(self, file_path = "pyspect_test/hjb_mpc/out_thin_mov.npy"):
         """Load the HJ value function from a .npy file and prepare for interpolation."""
-        self.value_function = np.load(file_path, mmap_mode='r').copy()
-        self.dims = self.value_function.shape
+        raw = np.load(file_path, mmap_mode='r').copy()
+        self.dims = raw.shape
+        self.value_function = np.concatenate([raw, raw, raw], axis=3)
+        self.dims = raw.shape
         print("Loaded value function of type", type(self.value_function),
               "of shape", self.dims)
 
@@ -418,8 +419,8 @@ class MPC_acados:
         original approach.
         """
         horizon = int(3)
-        delta_plus  = [horizon, horizon, horizon, horizon, 5]
-        delta_minus = [      2, horizon, horizon, horizon, 5]
+        delta_plus  = [horizon, horizon, horizon, 5, 5]
+        delta_minus = [      2, horizon, horizon, 5, 5]
 
         index = list(self.coord_to_index(state))
         index[3] = index[3] + self.dims[3]
@@ -766,6 +767,11 @@ def plot_comp_time(Car):
 
 
 
+OBSTACLES = [
+    (0.0, 0.0, 2.0, 2.0),   # Obstacle 1: lower-left 2x2 square
+    (1.2, 2.8, 2.8, 0.4),   # Obstacle 2: top corridor block
+]
+
 def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, save_path="./",
                              used_sets=None, file_path=None):
     """
@@ -861,9 +867,42 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
         ax.set_title('Value Function (X vs Y)');  ax.axis('equal')
         ax.plot(predicted_path[index_t][0], predicted_path[index_t][1], "yo")
         ax.plot(x, y, "ro")
+        for _ox, _oy, _ow, _oh in OBSTACLES:
+            ax.add_patch(plt.Rectangle((_ox, _oy), _ow, _oh,
+                                       linewidth=1.5, edgecolor='white',
+                                       facecolor='gray', alpha=0.6, zorder=5))
+
+
+        # XY heatmap — vectorised: build all query points at once
+        x_vals = np.linspace(Car.X0, Car.X0 + Car.XN, 100)
+        y_vals = np.linspace(Car.Y0, Car.Y0 + Car.YN, 100)
+        xg, yg = np.meshgrid(x_vals, y_vals, indexing='ij')   # (100,100)
+        n_pts  = xg.size
+        pts_xy = np.column_stack([
+            np.full(n_pts, t), xg.ravel(), yg.ravel(),
+            np.full(n_pts, theta), np.full(n_pts, v)
+        ])
+        Z_xy = V_interpolated_seg(pts_xy).reshape(100, 100)
+
+        _zmin_xy, _zmax_xy = Z_xy.min(), Z_xy.max()
+        if _zmax_xy - _zmin_xy > 1e-10:
+            c = ax2.contourf(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 50), cmap="viridis")
+            ax2.contour(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 10), colors="black", linewidths=0.5)
+        else:
+            c = ax2.contourf(x_vals, y_vals, Z_xy.T, levels=1, cmap="viridis")
+        if Z_xy.max() > 0 and Z_xy.min() < 0:
+            ax2.contour(x_vals, y_vals, Z_xy.T, levels=[0], colors="red", linewidths=2.0)
+        ax2.set_xlabel('X-axis');  ax2.set_ylabel('Y-axis')
+        ax2.set_title('Value Function (X vs Y)');  ax2.axis('equal')
+        ax2.plot(predicted_path[index_t][0], predicted_path[index_t][1], "yo")
+        ax2.plot(x, y, "ro")
+        for _ox, _oy, _ow, _oh in OBSTACLES:
+            ax2.add_patch(plt.Rectangle((_ox, _oy), _ow, _oh,
+                                        linewidth=1.5, edgecolor='white',
+                                        facecolor='gray', alpha=0.6, zorder=5))
 
         # Theta-v heatmap — vectorised
-        theta_vals = np.linspace(-np.pi, np.pi, 15)
+        theta_vals = np.linspace(-np.pi*3, np.pi*3, 45)
         v_vals     = np.linspace(Car.min_velocity, Car.max_velocity, 11)
         tg, vg = np.meshgrid(theta_vals, v_vals, indexing='ij')   # (100,100)
         n_pts  = tg.size
@@ -876,39 +915,16 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
 
         _zmin_tv, _zmax_tv = Z_tv.min(), Z_tv.max()
         if _zmax_tv - _zmin_tv > 1e-10:
-            ax2.contourf(theta_vals, v_vals, Z_tv.T, levels=np.linspace(_zmin_tv, _zmax_tv, 50), cmap="viridis")
-            ax2.contour(theta_vals, v_vals, Z_tv.T, levels=np.linspace(_zmin_tv, _zmax_tv, 10), colors="black", linewidths=0.5)
+            ax3.contourf(theta_vals, v_vals, Z_tv.T, levels=np.linspace(_zmin_tv, _zmax_tv, 50), cmap="viridis")
+            ax3.contour(theta_vals, v_vals, Z_tv.T, levels=np.linspace(_zmin_tv, _zmax_tv, 10), colors="black", linewidths=0.5)
         else:
-            ax2.contourf(theta_vals, v_vals, Z_tv.T, levels=1, cmap="viridis")
+            ax3.contourf(theta_vals, v_vals, Z_tv.T, levels=1, cmap="viridis")
         if Z_tv.max() > 0 and Z_tv.min() < 0:
-            ax2.contour(theta_vals, v_vals, Z_tv.T, levels=[0], colors="red", linewidths=2.0)
-        ax2.set_xlabel('Theta');  ax2.set_ylabel('Velocity')
-        ax2.set_title('Value Function (Theta vs V)')
-        ax2.plot(predicted_path[index_t][2], predicted_path[index_t][3], "yo")
-        ax2.plot(theta, v, "ro")
-
-        # # Theta-delta heatmap — vectorised
-        # delta_vals = np.linspace(Car.min_steering, Car.max_steering, 100)
-        # tg2, dg = np.meshgrid(theta_vals, delta_vals, indexing='ij')  # (100,100)
-        # n_pts   = tg2.size
-        # pts_td  = np.column_stack([
-        #     np.full(n_pts, t), np.full(n_pts, x), np.full(n_pts, y),
-        #     tg2.ravel(), np.full(n_pts, v), dg.ravel()
-        # ])
-        # Z_td = V_interpolated_seg(pts_td).reshape(100, 100)
-
-        # _zmin_td, _zmax_td = Z_td.min(), Z_td.max()
-        # if _zmax_td - _zmin_td > 1e-10:
-        #     ax3.contourf(theta_vals, delta_vals, Z_td.T, levels=np.linspace(_zmin_td, _zmax_td, 50), cmap="viridis")
-        #     ax3.contour(theta_vals, delta_vals, Z_td.T, levels=np.linspace(_zmin_td, _zmax_td, 10), colors="black", linewidths=0.5)
-        # else:
-        #     ax3.contourf(theta_vals, delta_vals, Z_td.T, levels=1, cmap="viridis")
-        # if Z_td.max() > 0 and Z_td.min() < 0:
-        #     ax3.contour(theta_vals, delta_vals, Z_td.T, levels=[0], colors="red", linewidths=2.0)
-        # ax3.set_xlabel('Theta');  ax3.set_ylabel('Delta')
-        # ax3.set_title('Value Function (Theta vs Delta)')
-        # ax3.plot(predicted_path[index_t][2], predicted_path[index_t][4], "yo")
-        # ax3.plot(theta, delta, "ro")
+            ax3.contour(theta_vals, v_vals, Z_tv.T, levels=[0], colors="red", linewidths=2.0)
+        ax3.set_xlabel('Theta');  ax3.set_ylabel('Velocity')
+        ax3.set_title('Value Function (Theta vs V)')
+        ax3.plot(predicted_path[index_t][2], predicted_path[index_t][3], "yo")
+        ax3.plot(theta, v, "ro")
 
         # 分割框
         seg = Car.grids_segment_list
@@ -919,17 +935,17 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
              seg[index_t][2][-1], seg[index_t][2][0]], "y"
         )
         ax2.plot(
+            [seg[index_t][1][0], seg[index_t][1][-1], seg[index_t][1][-1],
+             seg[index_t][1][0], seg[index_t][1][0]],
+            [seg[index_t][2][0], seg[index_t][2][0], seg[index_t][2][-1],
+             seg[index_t][2][-1], seg[index_t][2][0]], "y"
+        )
+        ax3.plot(
             [seg[index_t][3][0], seg[index_t][3][-1], seg[index_t][3][-1],
              seg[index_t][3][0], seg[index_t][3][0]],
             [seg[index_t][4][0], seg[index_t][4][0], seg[index_t][4][-1],
              seg[index_t][4][-1], seg[index_t][4][0]], "y"
         )
-        # ax3.plot(
-        #     [seg[index_t][3][0], seg[index_t][3][-1], seg[index_t][3][-1],
-        #      seg[index_t][3][0], seg[index_t][3][0]],
-        #     [seg[index_t][5][0], seg[index_t][5][0], seg[index_t][5][-1],
-        #      seg[index_t][5][-1], seg[index_t][5][0]], "y"
-        # )
 
         # ---------- Time vs Cost subplot ----------
         if costs_list is not None:
@@ -979,141 +995,64 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
 # Main
 # ===========================================================================
 
-def main():
-    nr  = 150
-    Car = MPC_acados(nr)
-
-    states          = [[0, 3.0, 0.5, np.pi/2, 0.0]]
-    predicted_path  = []
-    predicted_input = []
-    costs_list      = []
-    used_sets    = []
-    current_data_set = 0
-
-    
-    import json
-    json_for_path = "./path_info.json"
-    while not os.path.exists(json_for_path):
-        tm.sleep(0.1)
-    data = json.load(open(json_for_path))
-    folder_path = data["folder"]
-    while not os.path.exists(folder_path + "/hj_set_update.json"):
-        tm.sleep(0.1)
-    data = json.load(open(folder_path + "/hj_set_update.json"))
-    file_path = data["file_path"]
-
-    Car.set_value_function(file_path[current_data_set])
-    used_sets.append(current_data_set)
-
-    for it in tqdm(range(nr)):
-        start_time = tm.time()
-        time = states[-1][0]
-
-        data = json.load(open(folder_path + "/hj_set_update.json"))
-
-        current_time = Car.dt * it
-        horizon = data["horizon"]
-
-        candidates = [i for i in range(len(horizon)) if current_time > horizon[i][0] + 1]
-        if candidates:
-            i = max(candidates, key=lambda i: horizon[i][0])
-        else:
-            i = min(range(len(horizon)), key=lambda i: horizon[i][0])
-
-        if current_data_set != i:
-            current_data_set = i
-            # print(f"Currrent time: {current_time:.2f} s, switching to dataset {current_data_set} with horizon {horizon[current_data_set]}")
-            Car.set_value_function(file_path[current_data_set])
-
-        used_sets.append(current_data_set)
-        
-        #Projecting the state to the horizon of the current dataset
-        t_start, t_end = horizon[current_data_set][0], horizon[current_data_set][1]
-        time_max_hj    = Car.dt * Car.dims[0]
-
-        HJ_time = current_time - t_start
-        HJ_time = float(np.clip(HJ_time, 0.0, time_max_hj))
-
-        Car.compute_control(states[-1][1:], HJ_time, it)
-
-        ns = Car.get_optimal_states()   # shape (5, N+1)
-        nu = Car.get_optimal_control()  # shape (2, N)
-
-        next_state = [ns[i][1] for i in range(5)]
-        while next_state[2] < -np.pi: next_state[2] += 2 * np.pi
-        while next_state[2] >  np.pi: next_state[2] -= 2 * np.pi
-
-        predicted_path.append(ns)
-        predicted_input.append(nu)
-
-        # Evaluate V along predicted horizon (vectorised)
-        h = Car.current_horizon + 1
-        pts_cost = np.column_stack([
-            HJ_time + np.arange(h) * Car.dt,  
-            ns[0, :h], ns[1, :h], ns[2, :h], ns[3, :h], ns[4, :h]
-        ])
-        costs = Car.V(pts_cost).tolist()
-        costs_list.append(costs)
-
-        if costs[1] <= 0:
-            states.append([time + Car.dt] + next_state)
-        else:
-            states.append([time] + next_state)
-
-        end_time = tm.time()
-
-        # tm.sleep(dyn.time_step - (end_time - start_time))
-
-
-    data = json.load(open(folder_path + "/hj_set_update.json"))
-    
-    def convert_to_serializable(obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, list):
-            return [convert_to_serializable(i) for i in obj]
-        elif isinstance(obj, dict):
-            return {k: convert_to_serializable(v) for k, v in obj.items()}
-        return obj
-    data["states"] = convert_to_serializable(states)
-    data["predicted_path"] = convert_to_serializable(predicted_path)
-    data["costs_list"] = convert_to_serializable(costs_list)
-    data["used_sets"] = convert_to_serializable(used_sets)
-
-    data["mpc_step_length"]=Car.dt
-    data["total_steps"]=nr
-    json.dump(data, open(f"{folder_path}/hj_set_update.json", "w"))
-    # os.remove(json_for_path)
-
-    animate_heat_map_segment(Car, states, nr, predicted_path, costs_list, folder_path,
-                             used_sets=used_sets, file_path=file_path)
-    # plt.show()
-
-
-main()
-
 # def main():
-#     nr  = 150
+#     nr  = 200
 #     Car = MPC_acados(nr)
-#     Car.set_value_function("/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/out_bicycle4d.npy")
 
 #     states          = [[0, 3.0, 0.5, np.pi/2, 0.0]]
 #     predicted_path  = []
 #     predicted_input = []
 #     costs_list      = []
-    
-#     # import json
+#     used_sets    = []
+#     current_data_set = 0
 
-#     # data = json.load(open("hj_set_update.json"))
-#     # update_time = data["last_update"]
+    
+#     import json
+#     json_for_path = "./path_info.json"
+#     while not os.path.exists(json_for_path):
+#         tm.sleep(0.1)
+#     data = json.load(open(json_for_path))
+#     folder_path = data["folder"]
+#     while not os.path.exists(folder_path + "/hj_set_update.json"):
+#         tm.sleep(0.1)
+#     data = json.load(open(folder_path + "/hj_set_update.json"))
+#     file_path = data["file_path"]
+
+#     Car.set_value_function(file_path[current_data_set])
+#     used_sets.append(current_data_set)
 
 #     for it in tqdm(range(nr)):
 #         start_time = tm.time()
 #         time = states[-1][0]
 
-#         Car.compute_control(states[-1][1:], time, it)
+#         data = json.load(open(folder_path + "/hj_set_update.json"))
 
-#         ns = Car.get_optimal_states()   # shape (4, N+1)
+#         current_time = Car.dt * it
+#         horizon = data["horizon"]
+
+#         candidates = [i for i in range(len(horizon)) if current_time > horizon[i][0] + 1]
+#         if candidates:
+#             i = max(candidates, key=lambda i: horizon[i][0])
+#         else:
+#             i = min(range(len(horizon)), key=lambda i: horizon[i][0])
+
+#         if current_data_set != i:
+#             current_data_set = i
+#             # print(f"Currrent time: {current_time:.2f} s, switching to dataset {current_data_set} with horizon {horizon[current_data_set]}")
+#             Car.set_value_function(file_path[current_data_set])
+
+#         used_sets.append(current_data_set)
+        
+#         #Projecting the state to the horizon of the current dataset
+#         t_start, t_end = horizon[current_data_set][0], horizon[current_data_set][1]
+#         time_max_hj    = Car.dt * Car.dims[0]
+
+#         HJ_time = current_time - t_start
+#         print(f"Iteration number: {it}, HJ time: {HJ_time} s")
+
+#         Car.compute_control(states[-1][1:], HJ_time, it)
+
+#         ns = Car.get_optimal_states()   # shape (5, N+1)
 #         nu = Car.get_optimal_control()  # shape (2, N)
 
 #         next_state = [ns[i][1] for i in range(4)]
@@ -1126,7 +1065,7 @@ main()
 #         # Evaluate V along predicted horizon (vectorised)
 #         h = Car.current_horizon + 1
 #         pts_cost = np.column_stack([
-#             time + np.arange(h) * Car.dt,
+#             HJ_time + np.arange(h) * Car.dt,  
 #             ns[0, :h], ns[1, :h], ns[2, :h], ns[3, :h]
 #         ])
 #         costs = Car.V(pts_cost).tolist()
@@ -1141,8 +1080,85 @@ main()
 
 #         # tm.sleep(dyn.time_step - (end_time - start_time))
 
-#     animate_heat_map_segment(Car, states, nr, predicted_path, costs_list)
+
+#     data = json.load(open(folder_path + "/hj_set_update.json"))
+    
+#     def convert_to_serializable(obj):
+#         if isinstance(obj, np.ndarray):
+#             return obj.tolist()
+#         elif isinstance(obj, list):
+#             return [convert_to_serializable(i) for i in obj]
+#         elif isinstance(obj, dict):
+#             return {k: convert_to_serializable(v) for k, v in obj.items()}
+#         return obj
+#     data["states"] = convert_to_serializable(states)
+#     data["predicted_path"] = convert_to_serializable(predicted_path)
+#     data["costs_list"] = convert_to_serializable(costs_list)
+#     data["used_sets"] = convert_to_serializable(used_sets)
+
+#     data["mpc_step_length"]=Car.dt
+#     data["total_steps"]=nr
+#     json.dump(data, open(f"{folder_path}/hj_set_update.json", "w"))
+#     # os.remove(json_for_path)
+
+#     animate_heat_map_segment(Car, states, nr, predicted_path, costs_list, folder_path,
+#                              used_sets=used_sets, file_path=file_path)
 #     # plt.show()
 
 
 # main()
+
+def main():
+    nr  = 200
+    Car = MPC_acados(nr)
+    Car.set_value_function("/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/out_bicycle4d.npy")
+
+    states          = [[0, 3.0, 0.5, np.pi/2, 0.0]]
+    predicted_path  = []
+    predicted_input = []
+    costs_list      = []
+    
+    # import json
+
+    # data = json.load(open("hj_set_update.json"))
+    # update_time = data["last_update"]
+
+    for it in tqdm(range(nr)):
+        start_time = tm.time()
+        time = states[-1][0]
+
+        Car.compute_control(states[-1][1:], time, it)
+
+        ns = Car.get_optimal_states()   # shape (5, N+1)
+        nu = Car.get_optimal_control()  # shape (2, N)
+
+        next_state = [ns[i][1] for i in range(4)]
+        while next_state[2] < -np.pi: next_state[2] += 2 * np.pi
+        while next_state[2] >  np.pi: next_state[2] -= 2 * np.pi
+
+        predicted_path.append(ns)
+        predicted_input.append(nu)
+
+        # Evaluate V along predicted horizon (vectorised)
+        h = Car.current_horizon + 1
+        pts_cost = np.column_stack([
+            time + np.arange(h) * Car.dt,
+            ns[0, :h], ns[1, :h], ns[2, :h], ns[3, :h]
+        ])
+        costs = Car.V(pts_cost).tolist()
+        costs_list.append(costs)
+
+        if costs[1] <= 0:
+            states.append([time + Car.dt] + next_state)
+        else:
+            states.append([time] + next_state)
+
+        end_time = tm.time()
+
+        # tm.sleep(dyn.time_step - (end_time - start_time))
+
+    animate_heat_map_segment(Car, states, nr, predicted_path, costs_list)
+    plt.show()
+
+
+main()
