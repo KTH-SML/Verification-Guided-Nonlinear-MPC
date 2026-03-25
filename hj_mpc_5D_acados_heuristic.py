@@ -420,6 +420,7 @@ class MPC_acados:
         The resulting segment and grid are mathematically identical to the
         original approach.
         """
+
         delta_plus  = [horizon, horizon, horizon, horizon, 5, 12]
         delta_minus = [      2, horizon, horizon, horizon, 5, 12]
 

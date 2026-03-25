@@ -18,7 +18,7 @@ state_weight_matrix = [1, 0, 0, 0,
                        0, 0, 0, 1]
 
 # Q1 5D
-state_weight_matrix_5D =   [0, 0, 0, 0,
+state_weight_matrix_4D =   [0, 0, 0, 0,
                             0, 0, 0, 0,
                             0, 0, 0, 0, 
                             0, 0, 0, 0]                            
@@ -45,7 +45,7 @@ final_state_weight_matrix = [1, 0, 0, 0,
                              0, 0, 0, 1]
 
 # Qf 5D
-final_state_weight_matrix_5D = [0, 0, 0, 0,
+final_state_weight_matrix_4D = [0, 0, 0, 0,
                                 0, 0, 0, 0,
                                 0, 0, 0, 0,
                                 0, 0, 0, 0]

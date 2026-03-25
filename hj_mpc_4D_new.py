@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 """
-HJ-MPC 5D Controller using acados (replacing CasADi/IPOPT backend).
+HJ-MPC 4D Controller using acados (replacing CasADi/IPOPT backend).
 
 Key differences from the CasADi version:
   - Model and cost are defined symbolically via CasADi (acados uses CasADi internally)
@@ -67,10 +67,10 @@ class MPC_acados:
         self.current_horizon = self.N
 
         # ----- Weight matrices -------------------------------------------------
-        self.Q1  = np.array(dyn.state_weight_matrix_5D,    dtype=float).reshape(4, 4)
+        self.Q1  = np.array(dyn.state_weight_matrix_4D,    dtype=float).reshape(4, 4)
         self.Q2  = np.array(dyn.control_rate_weight_matrix, dtype=float).reshape(2, 2)
         self.Q3  = np.array(dyn.control_weight_matrix,      dtype=float).reshape(2, 2)
-        self.Qf  = np.array(dyn.final_state_weight_matrix_5D, dtype=float).reshape(4, 4)
+        self.Qf  = np.array(dyn.final_state_weight_matrix_4D, dtype=float).reshape(4, 4)
         self.Qv  = float(dyn.forward_speed_weight)
         self.Qs  = float(dyn.steering_weight)
         self.Qhj = float(dyn.reachability_set_weight)
@@ -741,7 +741,7 @@ def plot_path(Car, states):
             [Car.Y0, Car.Y0, Car.Y0 + Car.YN, Car.Y0 + Car.YN, Car.Y0],
             color='black')
     ax.grid()
-    fig.savefig("a_path_5D_acados.png", dpi=300)
+    fig.savefig("a_path_4D_acados.png", dpi=300)
 
 
 def plot_input(Car, inp):
@@ -753,7 +753,7 @@ def plot_input(Car, inp):
     ax2.plot(np.degrees(inp[:, 1, 0]), label="Steering Rate", color='tab:orange')
     ax2.axhline(0, color='black', linestyle='--', linewidth=1)
     ax2.set_ylabel("Steering Rate [deg/s]");  ax2.set_xlabel("Time step")
-    fig.savefig("a_input_5D_acados.png", dpi=300)
+    fig.savefig("a_input_4D_acados.png", dpi=300)
 
 
 def plot_comp_time(Car):
@@ -763,7 +763,7 @@ def plot_comp_time(Car):
     ax.plot(t[:, 2], label="Solver")
     ax.set_xlabel("Iteration");  ax.set_ylabel("Time [s]")
     ax.set_title("Computation times");  ax.legend()
-    fig.savefig("a_comp_time_5D_acados.png", dpi=300)
+    fig.savefig("a_comp_time_4D_acados.png", dpi=300)
 
 
 
@@ -772,12 +772,21 @@ OBSTACLES = [
     (1.2, 2.8, 2.8, 0.4),   # Obstacle 2: top corridor block
 ]
 
+MOVING_OBSTACLES = [
+    # (w, h, x0, y0, x1, y1, t_start, t_end)
+    (0.4, 0.5, 1.8, 2.85, 1.8, 4.50,  0.1,  4.1),   # seg 0: moves up
+    (0.4, 0.5, 1.8, 3.50, 1.8, 2.85,  4.1,  8.1),   # seg 1: moves down
+    (0.4, 0.5, 1.8, 2.85, 1.8, 4.50, 10.1, 14.1),   # seg 2: moves up
+    (0.4, 0.5, 1.8, 3.50, 1.8, 2.85, 14.1, 18.1),   # seg 3: moves down
+    (0.4, 0.5, 1.8, 2.85, 1.8, 4.50, 19.1, 20.0),   # seg 4: moves up
+]
+
 def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, save_path="./",
                              used_sets=None, file_path=None):
     """
     逐帧渲染并保存为 PNG（存入 save_path/frames/），
     所有帧保存完毕后用 Pillow 合并成 GIF 动画。
-
+ 
     优点：
       - 每帧独立 figure，渲染后立即 plt.close()，内存峰值低
       - 可中断续跑（已存在的帧直接跳过）
@@ -787,12 +796,12 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
     """
     import glob
     from PIL import Image as PILImage
-
+ 
     print("Animating heat map for interpolation segmentation")
-
+ 
     # 跟踪当前已加载的 dataset，按需切换，避免重复 IO
     _active_dataset = [None]
-
+ 
     def _ensure_dataset(index_t):
         if used_sets is None or file_path is None:
             return
@@ -800,20 +809,20 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
         if ds != _active_dataset[0]:
             Car.set_value_function(file_path[ds])
             _active_dataset[0] = ds
-
+ 
     # ── 确定输出 GIF 文件名 ────────────────────────────────────────────────
     if USE_HJ_LINEAR:
-        gif_name = "animation_seg_5D_acados_heuristic_linear.gif"
+        gif_name = "animation_seg_4D_acados_heuristic_linear.gif"
     elif USE_HJ_DIAG_QUADRATIC:
-        gif_name = "animation_seg_5D_acados_heuristic_diagonal.gif"
+        gif_name = "animation_seg_4D_acados_heuristic_diagonal.gif"
     elif USE_HJ_FULL_QUADRATIC:
-        gif_name = "animation_seg_5D_acados_heuristic_full.gif"
+        gif_name = "animation_seg_4D_acados_heuristic_full.gif"
     else:
         raise RuntimeError("No HJ surrogate mode selected.")
-
+ 
     frames_dir = os.path.join(save_path, "frames")
     os.makedirs(frames_dir, exist_ok=True)
-
+ 
     # ── 逐帧渲染并保存 PNG ────────────────────────────────────────────────
     progress = tqdm(total=nr, desc="Rendering frames")
     for index_t in range(nr):
@@ -822,27 +831,27 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
             # 支持断点续跑：已有帧直接跳过
             progress.update(1)
             continue
-
+ 
         _ensure_dataset(index_t)
-
+ 
         V_interpolated_seg = Car.interpolate_V_segment(states[index_t], dyn.prediction_horizon)
         V_seg = Car.value_function # not interpolated
-
+ 
         fig = plt.figure(figsize=(18, 10))
         ax  = fig.add_subplot(2, 3, 1)
         ax2 = fig.add_subplot(2, 3, 2)
         ax3 = fig.add_subplot(2, 3, 3)
         ax4 = fig.add_subplot(2, 1, 2)   # Time vs Cost — full bottom row
-
+ 
         t     = states[index_t][0]
         x     = states[index_t][1]
         y     = states[index_t][2]
         theta = states[index_t][3]
         v     = states[index_t][4]
         # delta = states[index_t][5]
-
+ 
         _it, _ix, _iy, _ith, _iv = Car.coord_to_index([t, x, y, theta, v])
-
+ 
         # XY heatmap — vectorised
         x_vals = np.linspace(Car.X0, Car.X0 + Car.XN, 25)
         y_vals = np.linspace(Car.Y0, Car.Y0 + Car.YN, 25)
@@ -854,7 +863,7 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
         ])
         # Z_xy = V_interpolated_seg(pts_xy).reshape(100, 100)
         Z_xy = V_seg[_it, :, :, _ith, _iv]
-
+ 
         _zmin_xy, _zmax_xy = Z_xy.min(), Z_xy.max()
         if _zmax_xy - _zmin_xy > 1e-10:
             ax.contourf(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 50), cmap="viridis")
@@ -871,8 +880,20 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
             ax.add_patch(plt.Rectangle((_ox, _oy), _ow, _oh,
                                        linewidth=1.5, edgecolor='white',
                                        facecolor='gray', alpha=0.6, zorder=5))
-
-
+        for _w, _h, _x0, _y0, _x1, _y1, _t0, _t1 in MOVING_OBSTACLES:
+            if not (_t0 <= t <= _t1):
+                continue
+            _alpha = (t - _t0) / (_t1 - _t0)
+            _x = _x0 + _alpha * (_x1 - _x0)
+            _y = _y0 + _alpha * (_y1 - _y0)
+            _xlo = max(_x, 0.0); _ylo = max(_y, 0.0)
+            _xhi = min(_x + _w, 4.0); _yhi = min(_y + _h, 4.0)
+            if _xhi > _xlo and _yhi > _ylo:
+                ax.add_patch(plt.Rectangle((_xlo, _ylo), _xhi - _xlo, _yhi - _ylo,
+                                        linewidth=1.5, edgecolor='white',
+                                        facecolor='white', alpha=0.5, zorder=6))
+ 
+ 
         # XY heatmap — vectorised: build all query points at once
         x_vals = np.linspace(Car.X0, Car.X0 + Car.XN, 100)
         y_vals = np.linspace(Car.Y0, Car.Y0 + Car.YN, 100)
@@ -883,7 +904,7 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
             np.full(n_pts, theta), np.full(n_pts, v)
         ])
         Z_xy = V_interpolated_seg(pts_xy).reshape(100, 100)
-
+ 
         _zmin_xy, _zmax_xy = Z_xy.min(), Z_xy.max()
         if _zmax_xy - _zmin_xy > 1e-10:
             c = ax2.contourf(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 50), cmap="viridis")
@@ -900,7 +921,19 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
             ax2.add_patch(plt.Rectangle((_ox, _oy), _ow, _oh,
                                         linewidth=1.5, edgecolor='white',
                                         facecolor='gray', alpha=0.6, zorder=5))
-
+        for _w, _h, _x0, _y0, _x1, _y1, _t0, _t1 in MOVING_OBSTACLES:
+            if not (_t0 <= t <= _t1):
+                continue
+            _alpha = (t - _t0) / (_t1 - _t0)
+            _x = _x0 + _alpha * (_x1 - _x0)
+            _y = _y0 + _alpha * (_y1 - _y0)
+            _xlo = max(_x, 0.0); _ylo = max(_y, 0.0)
+            _xhi = min(_x + _w, 4.0); _yhi = min(_y + _h, 4.0)
+            if _xhi > _xlo and _yhi > _ylo:
+                ax.add_patch(plt.Rectangle((_xlo, _ylo), _xhi - _xlo, _yhi - _ylo,
+                                        linewidth=1.5, edgecolor='white',
+                                        facecolor='white', alpha=0.5, zorder=6))
+ 
         # Theta-v heatmap — vectorised
         theta_vals = np.linspace(-np.pi*3, np.pi*3, 45)
         v_vals     = np.linspace(Car.min_velocity, Car.max_velocity, 11)
@@ -912,7 +945,7 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
         ])
         # Z_tv = V_interpolated_seg(pts_tv).reshape(100, 100)
         Z_tv = V_seg[_it, _ix, _iy, :, :]
-
+ 
         _zmin_tv, _zmax_tv = Z_tv.min(), Z_tv.max()
         if _zmax_tv - _zmin_tv > 1e-10:
             ax3.contourf(theta_vals, v_vals, Z_tv.T, levels=np.linspace(_zmin_tv, _zmax_tv, 50), cmap="viridis")
@@ -925,7 +958,7 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
         ax3.set_title('Value Function (Theta vs V)')
         ax3.plot(predicted_path[index_t][2], predicted_path[index_t][3], "yo")
         ax3.plot(theta, v, "ro")
-
+ 
         # 分割框
         seg = Car.grids_segment_list
         ax.plot(
@@ -946,7 +979,7 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
             [seg[index_t][4][0], seg[index_t][4][0], seg[index_t][4][-1],
              seg[index_t][4][-1], seg[index_t][4][0]], "y"
         )
-
+ 
         # ---------- Time vs Cost subplot ----------
         if costs_list is not None:
             time_axis     = np.arange(len(costs_list)) * Car.dt
@@ -963,19 +996,19 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
             ax4.legend(loc='upper right', fontsize=8)
             ax4.grid(True, alpha=0.4)
         # ------------------------------------------
-
+ 
         fig.tight_layout()
         fig.savefig(frame_path, dpi=100)
         plt.close(fig)
         progress.update(1)
-
+ 
     progress.close()
-
+ 
     print("Assembling GIF from frames...")
     frame_paths = sorted(glob.glob(os.path.join(frames_dir, "frame_*.png")))
     if not frame_paths:
         raise RuntimeError(f"No frames found in {frames_dir}")
-
+ 
     pil_frames = [PILImage.open(fp).convert("RGB") for fp in frame_paths]
     gif_path = os.path.join(save_path, gif_name)
     pil_frames[0].save(
@@ -1111,7 +1144,7 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
 def main():
     nr  = 200
     Car = MPC_acados(nr)
-    Car.set_value_function("/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/out_bicycle4d.npy")
+    Car.set_value_function("/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/out_bicycle4d_with_obs.npy")
 
     states          = [[0, 3.0, 0.5, np.pi/2, 0.0]]
     predicted_path  = []
@@ -1133,8 +1166,9 @@ def main():
         nu = Car.get_optimal_control()  # shape (2, N)
 
         next_state = [ns[i][1] for i in range(4)]
-        while next_state[2] < -np.pi: next_state[2] += 2 * np.pi
-        while next_state[2] >  np.pi: next_state[2] -= 2 * np.pi
+        # while next_state[2] < -np.pi: next_state[2] += 2 * np.pi
+        # while next_state[2] >  np.pi: next_state[2] -= 2 * np.pi
+        next_state[2] = next_state[2] if abs(next_state[2]) <= np.pi * 1.2 else next_state[2] -np.sign(next_state[2]) * 2 * np.pi
 
         predicted_path.append(ns)
         predicted_input.append(nu)
