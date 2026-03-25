@@ -22,7 +22,7 @@ state_weight_matrix_5D =   [0, 0, 0, 0, 0,
                             0, 0, 0, 0, 0,
                             0, 0, 0, 0, 0,
                             0, 0, 0, 0, 0,
-                            0, 0, 0, 0, 0]
+                            0, 0, 0, 0, 0]                            
 # state_weight_matrix_5D =   [1, 0, 0, 0, 0,
 #                             0, 1, 0, 0, 0,
 #                             0, 0, 1, 0, 0,
@@ -36,6 +36,8 @@ control_rate_weight_matrix = [0, 0,
 # Q3
 control_weight_matrix = [0.0, 0,
                         0, 0.0]
+# control_weight_matrix= [0.1, 0,
+#                         0, 0.1]
 
 # Qf
 final_state_weight_matrix = [1, 0, 0, 0,

@@ -368,48 +368,6 @@ class MPC_casadi:
         self.dims = self.value_function.shape
         print("Loaded value function of type",type(self.value_function),"of shape",self.dims)
 
-    def compute_inital_trajectory(self):
-        """
-        Computes an initial warmstart for the optimization problem.
-        This is done by computing a path from the reachability function V.
-        """
-        # Compute warmstart from the reachability function and returns a list of states
-        self.local_state_cost = self.interpolate_V_segment(self.init_state, self.current_horizon, add_segment_to_list=False)
-        self.set_objective_function(self.init_state[0], do_input_cost=False)
-        self.opti.set_value(self.x_init, self.init_state[1:])
-
-        # Solve the optimization problem
-        try:    self.sol = self.opti.solve()
-        except: self.sol = self.opti.debug
-
-        self.trajectory = self.get_optimal_states().T[1:]
-
-    def interpolate_V_segment(self, state, horizon, add_segment_to_list=True):
-        """
-        This intepolates a segment depending on the current state, prediction horizon and allowed marginal\n
-        """
-        delta_plus  = [horizon, horizon, horizon, horizon, 3, 3]
-        delta_minus = [      1, horizon, horizon, horizon, 3, 3]
-        index = list(self.coord_to_index(state))
-        index[3] = index[3] + self.dims[3]
-        indices = [[max(0,index[i]-delta_minus[i]), min(self.dims[i],index[i]+delta_plus[i])] for i in range(6)]
-        indices[3] = [index[3]-delta_minus[3], index[3]+delta_plus[3]]    # Special case for theta since it wraps around
-
-        slices = tuple(slice(indices[i][0], indices[i][1]+1) for i in range(6))
-
-        value_func_segment = self.value_func_wrapped[slices]
-        dims_segment = value_func_segment.shape
-        # print(state)
-        self.grids_segment = [np.linspace(self.d_states[i] * indices[i][0] + self.min_bounds_state[i], self.d_states[i] * indices[i][1] + self.min_bounds_state[i], dims_segment[i]) for i in range(6)]
-        self.grids_segment[3] = np.linspace(self.d_states[3] * indices[3][0] + self.min_bounds_state[3] - 2*np.pi, self.d_states[3] * indices[3][1] + self.min_bounds_state[3] - 2*np.pi, dims_segment[3])
-
-        if add_segment_to_list:
-            self.grids_segment_list.append(copy.deepcopy(self.grids_segment))
-
-        # Create CasADi interpolation function
-        # print("Attempting interpolation for value function segment with shape", value_func_segment.shape)
-        return ca.interpolant("local_state_cost", "linear", self.grids_segment, value_func_segment.ravel(order="F"))  # Column-major flattening
-
     def interpolate_U_segment(self, current_state, horizon):
         """
         Interpolates the Hamilton-Jacobi control input cost over a time horizon.
@@ -502,78 +460,6 @@ class MPC_casadi:
 
         return U_locked_list
 
-    def interpolate_U_segment_old(self, current_state, horizon):
-        """
-        Returns an interpolated function for the control input cost.\n
-        """
-
-        ### Create function HJ_eq for how the input set is computed ###
-
-        # delta_plus  = [self.current_horizon, 3, 3, 3, 3, 3]
-        # delta_minus = [                   1, 3, 3, 3, 3, 3]
-        delta_plus  = [self.current_horizon, 2, 2, 2, 2, 2]
-        delta_minus = [                   1, 2, 2, 2, 2, 2]
-        index = list(self.coord_to_index(current_state))
-        index[3] = index[3] + self.dims[3]
-        indices = [[max(0,index[i]-delta_minus[i]), min(self.dims[i],index[i]+delta_plus[i])] for i in range(6)]
-        indices[3] = [index[3]-delta_minus[3], index[3]+delta_plus[3]]    # Special case for theta since it wraps around
-
-        slices = tuple(slice(indices[i][0], indices[i][1]+1) for i in range(6))
-        value_func_segment = self.value_func_wrapped[slices]
-        dims_segment = value_func_segment.shape
-        # print(state)
-        self.grids_segment = [np.linspace(self.d_states[i] * indices[i][0] + self.min_bounds_state[i], self.d_states[i] * indices[i][1] + self.min_bounds_state[i], dims_segment[i]) for i in range(6)]
-        self.grids_segment[3] = np.linspace(self.d_states[3] * indices[3][0] + self.min_bounds_state[3] - 2*np.pi, self.d_states[3] * indices[3][1] + self.min_bounds_state[3] - 2*np.pi, dims_segment[3])
-
-        value_func_segment = self.value_func_wrapped[slices]
-        value_func_gradient = np.array(np.gradient(value_func_segment, *self.d_states, edge_order=2))  # Compute the gradient of the value function segment
-
-        ########################
-
-        t, x, y, theta, v, delta = ca.MX.sym('t'), ca.MX.sym('x'), ca.MX.sym('y'), ca.MX.sym('theta'), ca.MX.sym('v'), ca.MX.sym('delta')
-        a, omega = ca.MX.sym('a'), ca.MX.sym('omega')  # control input
-        state = ca.vertcat(x, y, theta, v, delta)
-        u = ca.vertcat(a, omega)
-
-        # Solve for U_set
-        # Partial derivatives
-        # print(value_func_gradient[0].shape)  # Partial derivative with respect to time
-        Dt_V_ip = ca.interpolant("Dt_V_ip", "linear", self.grids_segment, value_func_gradient[0].ravel(order="F"))
-        Dx_V_ip = ca.interpolant("Dx_V_ip", "linear", self.grids_segment, value_func_gradient[1:].ravel(order="F"))
-
-        Dt_V = ca.Function('Dt_V', [t, state], [Dt_V_ip(ca.vertcat(t, state))])(t,state)
-        Dx_V = ca.Function('Dx_V', [t, state], [Dx_V_ip(ca.vertcat(t, state))])(t,state).T
-
-        f_1 =ca.vertcat(v * ca.cos(theta),
-                        v * ca.sin(theta),
-                        v * ca.tan(delta)/self.L,
-                        0,
-                        0)  # State dynamics
-        f_2 = ca.MX(5,2)    # Control input dynamics
-        f_2[3,0] = 1        # Acceleration
-        f_2[4,1] = 1        # Steering rate
-
-        alpha = Dt_V + ca.mtimes(Dx_V, f_1)
-        beta = ca.mtimes(Dx_V, f_2)
-
-        # Hamilton-Jacobi equation
-        U_live_MX = alpha + ca.mtimes(beta,u) # Set up the linear system (alpha + beta * u)
-        U_live = ca.Function('U_live', [t, state, u], [U_live_MX])
-
-        U_locked_list = []
-        predicted_states = np.array(self.trajectory)[:self.N,1:]
-        assert predicted_states.shape[1] == 5
-
-        # Create a function for the HJ equation with locked state
-        
-        for k in range(self.current_horizon):
-            time = min(current_state[0] + k*self.dt, self.dt * self.dims[0])
-            # print("Time:", time, "k:", k, "State:", predicted_states[k,:])
-            U_locked = ca.Function(f'U_locked_{k}', [u], [U_live(time,predicted_states[k,:],u)])
-            U_locked_list.append(copy.deepcopy(U_locked))
-
-        return U_locked_list
-
     def solve_U_set(self, current_state, horizon):
         """
         Sets up the interpolated function for the control input cost.\n
@@ -651,16 +537,6 @@ class MPC_casadi:
 
         return tuple(indices)
     
-    def find_edge_of_time(self, state):
-        '''
-        Returns the upper bound in time for which the value function is negative for a given state
-        '''
-        index = list(self.coord_to_index([0] + state))  # convert tuple to list
-
-        while self.value_function[tuple(index)] <= 0 and index[0] < self.dims[0]:
-            index[0] += 1
-
-        return index[0] * self.dt
 
 def plot_path(Car, states, some_trajectory=None):
     '''

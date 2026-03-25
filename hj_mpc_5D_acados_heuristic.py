@@ -41,15 +41,6 @@ assert sum([
 HJ_STAGE_PARAM_DIM = 32
 
 # ---------------------------------------------------------------------------
-# Helper: load value function
-# ---------------------------------------------------------------------------
-
-def get_value_function():
-    file_path = 'pyspect_test/hjb_mpc/out_thick_mov.npy' # "pyspect_test/hjb_mpc/out_bicycle5d.npy"
-    return np.load(file_path)
-
-
-# ---------------------------------------------------------------------------
 # Main controller class
 # ---------------------------------------------------------------------------
 
@@ -98,15 +89,15 @@ class MPC_acados:
         self.L                 = dyn.wheelbase
 
         # ----- Value function --------------------------------------------------
+        start_load = tm.time()
         self.set_value_function()
         self.dims = self.value_function.shape
+        end_load = tm.time()
 
-        # Wrap along yaw axis (dim 3) for angle wrap-around
-        self.value_func_wrapped = np.concatenate(
-            (self.value_function, self.value_function, self.value_function),
-            axis=3
-        )
-
+        # Theta wrap-around is handled lazily in interpolate_V_segment via
+        # np.take + modulo, so the full 3x concatenation along axis=3 is no
+        # longer needed here.  This eliminates ~1 s of memory allocation every
+        # time the value function is reloaded (every ~5 s in deployment).
         # Grid for interpolation
         time_max = self.dt * self.dims[0]
         self.min_bounds_state = np.array([
@@ -125,9 +116,6 @@ class MPC_acados:
         # ----- Interpolated value function (updated each solve) ----------------
         self.V = None          # RegularGridInterpolator, rebuilt in compute_control()
         self.HJ_time = None
-        self._V_cached_indices     = None
-        self._V_cached_interpolant = None  # RegularGridInterpolator instance
-        self._V_cached_grids       = None
 
         # Bookkeeping
         self.grids_segment_list = []
@@ -407,9 +395,9 @@ class MPC_acados:
     # Value function helpers  (identical to CasADi version)
     # =========================================================================
 
-    def set_value_function(self):
-        file_path = "pyspect_test/hjb_mpc/out_thick_mov.npy"
-        self.value_function = np.load(file_path)
+    def set_value_function(self, path = "out_bicycle5d.npy"):
+        file_path = path
+        self.value_function = np.load(file_path, mmap_mode='r').copy()
         self.dims = self.value_function.shape
         print("Loaded value function of type", type(self.value_function),
               "of shape", self.dims)
@@ -424,6 +412,13 @@ class MPC_acados:
 
         Returns a RegularGridInterpolator callable: V(pts) where pts has shape
         (M, 6), columns ordered [t, x, y, theta, v, delta].
+
+        Theta wrap-around is handled lazily: instead of pre-concatenating the
+        full array three times along axis=3 (expensive when the value function
+        is reloaded every ~5 s), we compute the required theta indices with
+        modulo arithmetic and use np.take to extract only the needed slice.
+        The resulting segment and grid are mathematically identical to the
+        original approach.
         """
         delta_plus  = [horizon, horizon, horizon, horizon, 5, 12]
         delta_minus = [      2, horizon, horizon, horizon, 5, 12]
@@ -438,11 +433,23 @@ class MPC_acados:
         ]
         indices[3] = [index[3] - delta_minus[3], index[3] + delta_plus[3]]
 
-        slices = tuple(slice(indices[i][0], indices[i][1] + 1) for i in range(6))
+        # ── Lazy theta wrap via np.take + modulo ─────────────────────────────
+        # Original approach: pre-concatenate value_func_wrapped = [V, V, V]
+        # along axis=3, then slice normally.  Cost: O(dims[3] * rest) copy.
+        #
+        # New approach: slice the five non-theta axes directly, then use
+        # np.take with wrapped indices along axis=3.  Only the segment's theta
+        # extent (~2*horizon+1 entries) is ever copied, not the whole array.
+        sl_t = slice(indices[0][0], indices[0][1] + 1)
+        sl_x = slice(indices[1][0], indices[1][1] + 1)
+        sl_y = slice(indices[2][0], indices[2][1] + 1)
+        sl_v = slice(indices[4][0], indices[4][1] + 1)
+        sl_d = slice(indices[5][0], indices[5][1] + 1)
 
-        # ascontiguousarray avoids an implicit copy during ravel when the slice
-        # produces a non-contiguous view (common after the axis-3 wrap concat).
-        value_func_segment = np.ascontiguousarray(self.value_func_wrapped[slices])
+        theta_idx = np.arange(indices[3][0], indices[3][1] + 1) % self.dims[3]
+
+        tmp = self.value_function[sl_t, sl_x, sl_y, :, sl_v, sl_d]
+        value_func_segment = np.ascontiguousarray(tmp[:, :, :, theta_idx, :, :])
         dims_segment = value_func_segment.shape  # ← ground truth for grid sizes
 
         # Use dims_segment[i] as the point count, NOT the index range,
@@ -455,7 +462,9 @@ class MPC_acados:
             )
             for i in range(6)
         ]
-        # Yaw: shift by -2π to account for the wrapped concatenation offset.
+        # Yaw: shift by -2π to account for the virtual wrap offset applied to
+        # index[3] (index[3] += dims[3] → raw grid values exceed [−π, π] by
+        # exactly 2π, so subtract 2π to restore physical coordinates).
         grids_segment[3] = np.linspace(
             self.d_states[3] * indices[3][0] + self.min_bounds_state[3] - 2 * np.pi,
             self.d_states[3] * indices[3][1] + self.min_bounds_state[3] - 2 * np.pi,
@@ -911,16 +920,24 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None):
 # ===========================================================================
 
 def main():
-    nr  = 200
+    nr  = 100
     Car = MPC_acados(nr)
+    Car.set_value_function("/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/hj_sets/hj_sets_20260323_192206/sets/slice3.npy")
 
     states          = [[0, 3.0, 0.5, np.pi/2, 0.0, 0.0]]
     predicted_path  = []
     predicted_input = []
     costs_list      = []
+    
+    # import json
+
+    # data = json.load(open("hj_set_update.json"))
+    # update_time = data["last_update"]
 
     for it in tqdm(range(nr)):
+        start_time = tm.time()
         time = states[-1][0]
+
         Car.compute_control(states[-1][1:], time, it)
 
         ns = Car.get_optimal_states()   # shape (5, N+1)
@@ -946,6 +963,10 @@ def main():
             states.append([time + Car.dt] + next_state)
         else:
             states.append([time] + next_state)
+
+        end_time = tm.time()
+
+        # tm.sleep(dyn.time_step - (end_time - start_time))
 
     animate_heat_map_segment(Car, states, nr, predicted_path, costs_list)
     plt.show()

@@ -19,6 +19,10 @@ src_path = os.path.join(parent_dir, "src")
 if src_path not in sys.path:
     sys.path.append(src_path)
 
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+from matplotlib.transforms import Affine2D
+
 # PYSPECT IMPORTS
 from pyspect import *
 from pyspect.primitives import *
@@ -32,6 +36,18 @@ from functools import reduce
 from math import pi
 import numpy as np
 import time as tm
+
+@primitive(ALWAYS('_1'))
+def Always_rci(_1: 'TLTLike') -> tuple[SetBuilder, APPROXDIR]:
+    b1, a1 = _1._builder, _1._approx
+
+    ao = APPROXDIR.UNDER
+    return (
+        AppliedSet('rci', b1),
+        ao + a1 if ao * a1 == APPROXDIR.EXACT else 
+        a1      if ao == a1 else
+        APPROXDIR.INVALID,
+    )
 
 class CorridorScenario:
     """4x4 corridor BRT scenario for a 5D bicycle model."""
@@ -50,7 +66,7 @@ class CorridorScenario:
  
     # ── Car geometry & initial state ──
     CAR_W, CAR_H = 0.25, 0.40
-    STATE_INIT = np.array([3.00, 0.32, pi / 2, 0.0, 0.5])
+    STATE_INIT = np.array([0.0, 0.32, pi / 2, 0.0, 0.5])
  
     # ── Moving obstacle parameters ──
     MOV_SPEED    = 0.3
@@ -64,7 +80,7 @@ class CorridorScenario:
     MAX_ACCEL      = 0.4
     MAX_VEL        = 0.8
     WHEELBASE      = 0.32
-    T_MAX          = 20
+    T_MAX          = 20.0
  
     def __init__(self):
         self._build_sets()
@@ -101,8 +117,10 @@ class CorridorScenario:
         )
         self.obstacles       = OR(lower_obstacle, upper_obstacle)
         self.moving_obstacle = self._build_moving_obstacle()
-        self.safe_region     = AND(self.map_box, NOT(OR(self.obstacles, self.moving_obstacle)))
- 
+        # self.safe_region     = AND(self.map_box, NOT(OR(self.obstacles, self.moving_obstacle)))
+        self.safe_region     = AND(self.map_box, NOT(self.obstacles))
+
+
         self._print_map_info()
  
     def _build_moving_obstacle(self):
@@ -147,30 +165,51 @@ class CorridorScenario:
  
     def _build_task(self):
         self.vehicle_task = UNTIL(self.safe_region, self.target_set)
+        self.safety_task = ALWAYS(NOT(self.obstacles))
  
     # ──────────────────────────────────────────────
     # 3) Build TVHJImpl
     # ──────────────────────────────────────────────
  
-    def _build_impl(self):
-        self.impl = TVHJImpl(
-            dynamics=dict(
-                cls=Bicycle5D,
-                min_steer=-self.MAX_STEER_RATE,
-                max_steer= self.MAX_STEER_RATE,
-                min_accel=-self.MAX_ACCEL,
-                max_accel= self.MAX_ACCEL,
-                wheelbase= self.WHEELBASE,
-            ),
-            axis_specs=[
-                dict(name="t",     bounds=[0, self.T_MAX],                    points=101),
-                dict(name="x",     bounds=[self.X0, self.X0 + self.XN],       points=25),
-                dict(name="y",     bounds=[self.Y0, self.Y0 + self.YN],       points=25),
-                dict(name="*yaw",  bounds=[-pi, pi],                          points=15),
-                dict(name="delta", bounds=[-self.MAX_STEER, self.MAX_STEER],  points=11),
-                dict(name="vel",   bounds=[0.0, self.MAX_VEL],                points=11),
-            ],
-        )
+    def _build_impl(self,t = None):
+        if t is None:
+            self.impl = TVHJImpl(
+                dynamics=dict(
+                    cls=Bicycle5D,
+                    min_steer=-self.MAX_STEER_RATE,
+                    max_steer= self.MAX_STEER_RATE,
+                    min_accel=-self.MAX_ACCEL,
+                    max_accel= self.MAX_ACCEL,
+                    wheelbase= self.WHEELBASE,
+                ),
+                axis_specs=[
+                    dict(name="t",     bounds=[0, self.T_MAX],                    points=51),
+                    dict(name="x",     bounds=[self.X0, self.X0 + self.XN],       points=25),
+                    dict(name="y",     bounds=[self.Y0, self.Y0 + self.YN],       points=25),
+                    dict(name="*yaw",  bounds=[-pi, pi],                          points=15),
+                    dict(name="delta", bounds=[-self.MAX_STEER, self.MAX_STEER],  points=11),
+                    dict(name="vel",   bounds=[0.0, self.MAX_VEL],                points=11),
+                ],
+            )
+        else:
+            self.impl = TVHJImpl(
+                dynamics=dict(
+                    cls=Bicycle5D,
+                    min_steer=-self.MAX_STEER_RATE,
+                    max_steer= self.MAX_STEER_RATE,
+                    min_accel=-self.MAX_ACCEL,
+                    max_accel= self.MAX_ACCEL,
+                    wheelbase= self.WHEELBASE,
+                ),
+                axis_specs=[
+                    dict(name="t",     bounds=[t[0], t[1]],                       points=51),
+                    dict(name="x",     bounds=[self.X0, self.X0 + self.XN],       points=25),
+                    dict(name="y",     bounds=[self.Y0, self.Y0 + self.YN],       points=25),
+                    dict(name="*yaw",  bounds=[-pi, pi],                          points=15),
+                    dict(name="delta", bounds=[-self.MAX_STEER, self.MAX_STEER],  points=11),
+                    dict(name="vel",   bounds=[0.0, self.MAX_VEL],                points=11),
+                ],
+            )
  
     # ──────────────────────────────────────────────
     # Public methods
@@ -237,18 +276,22 @@ class CorridorScenario:
  
     def compute_brt(self, save_path="out_bicycle5d.npy"):
         """Compute and save the backward reachable tube."""
-        jax.config.update("jax_platform_name", "cpu")
+        jax.config.update("jax_platform_name", "gpu")
         print(jax.default_backend())
         print(jax.devices())
  
-        out = TLT.construct(self.vehicle_task).realize(self.impl)
-        print("BRT shape:", out.shape)
+        # Vehicle Task - as cost function for MPC
+        value_task = TLT(self.vehicle_task).realize(self.impl)
+        print("BRT shape:", value_task.shape)
  
-        np.save(save_path, np.asarray(out))
+        np.save(save_path, np.asarray(value_task))
         print(f"Saved {save_path}")
+
+        # Safety Task - as hard constraint for MPC (s.t. V_A(x, t) <= 0)
+        value_safe = TLT(self.safety_task).realize(self.impl)
  
-        self.brt = out
-        return out
+        self.brt = value_task
+        return value_task, value_safe
  
     def plot_brt(self):
         """Visualize the BRT (must call compute_brt first)."""
@@ -269,19 +312,62 @@ class CorridorScenario:
         self.impl.plot(obs, axes=("x", "y", "t"), colorscale="reds").show()
         print(f"Moving obstacle value range: [{obs.min():.3f}, {obs.max():.3f}]")
 
+def split_horizon(total_time, window=10.0, step=5.0):
+    segments = []
+    start = 0.0
+    while start < total_time:
+        end = min(start + window, total_time)
+        segments.append([start, end])
+        start += step
+    return segments
+
 if __name__ == "__main__":
-    TLT.select(ContLTL)
+    compute_loop_time = 5.0 # seconds
+    horizon = 20.0 # seconds
+    horizon_segments = split_horizon(horizon)
+    horizons = []
+    paths = []
+
+    TLT.select(ContLTL | Always_rci)
     jax.config.update("jax_platform_name", "gpu")
     print(jax.default_backend())
     print(jax.devices())
     times = []
- 
+    
+
+    import json
+    from datetime import datetime
+    from pathlib import Path
+
+    folder_name = "hj_sets_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    folder_path = f"hj_sets/{folder_name}"
+    Path(folder_path + "/sets").mkdir(parents=True, exist_ok=True)
+    path_data = {"folder": folder_path}
+    json.dump(path_data, open("./path_info.json", "w"))
+
     scenario = CorridorScenario()
-    for i in range(10):
+
+    for i in range(len(horizon_segments)):
         tm_start = tm.time()
-        scenario.compute_brt()
+        now = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # scenario.plot_map()
+        save_path = f"hj_sets/{folder_name}/sets/Bicycle5D_{now}.npy"
+        scenario._build_impl(t=horizon_segments[i])
+        scenario.compute_brt(save_path=save_path)
+        horizons.append(horizon_segments[i])
+        paths.append(save_path)
         tm_end = tm.time()
         times.append(tm_end - tm_start)
+
         # print(f"Iteration {i+1}: BRT computed in {tm_end - tm_start:.2f} seconds")
+        data = {"file_path": paths, "horizon": horizons}
+        json.dump(data, open(f"hj_sets/{folder_name}/hj_set_update.json", "w"))
+
+        end_time = tm.time()
+
+        tm.sleep(max(0.0, compute_loop_time - (end_time - tm_start)))
+    
+    data = {"file_path": paths, "horizon": horizons, "time_step": CorridorScenario.dt, "set_compute_time":times, "compute_loop_time": compute_loop_time}
+    json.dump(data, open(f"hj_sets/{folder_name}/hj_set_update.json", "w"))
 
     print(f"Time for each iteration: {times}")
