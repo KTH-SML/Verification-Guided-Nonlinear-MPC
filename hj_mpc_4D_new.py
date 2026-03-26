@@ -358,8 +358,12 @@ class MPC_acados:
             steering = float(u0[1])
 
             # Cache solution for warm-starting
+            x_cached = np.array([self.acados_solver.get(k, "x") for k in range(self.N + 1)])
+            theta = x_cached[:, 2]
+            wrap_mask = np.abs(theta) > np.pi
+            x_cached[wrap_mask, 2] -= np.sign(theta[wrap_mask]) * 2 * np.pi
             self._sol = {
-                'x': np.array([self.acados_solver.get(k, "x") for k in range(self.N + 1)]),
+                'x': x_cached,
                 'u': np.array([self.acados_solver.get(k, "u") for k in range(self.N)]),
             }
 
@@ -395,7 +399,8 @@ class MPC_acados:
         """Load the HJ value function from a .npy file and prepare for interpolation."""
         raw = np.load(file_path, mmap_mode='r').copy()
         self.dims = raw.shape
-        self.value_function = np.concatenate([raw, raw, raw], axis=3)
+        # self.value_function = np.concatenate([raw, raw, raw], axis=3)
+        self.value_function = raw
         self.dims = raw.shape
         print("Loaded value function of type", type(self.value_function),
               "of shape", self.dims)
@@ -774,11 +779,11 @@ OBSTACLES = [
 
 MOVING_OBSTACLES = [
     # (w, h, x0, y0, x1, y1, t_start, t_end)
-    (0.4, 0.5, 1.8, 2.85, 1.8, 4.50,  0.1,  4.1),   # seg 0: moves up
-    (0.4, 0.5, 1.8, 3.50, 1.8, 2.85,  4.1,  8.1),   # seg 1: moves down
-    (0.4, 0.5, 1.8, 2.85, 1.8, 4.50, 10.1, 14.1),   # seg 2: moves up
-    (0.4, 0.5, 1.8, 3.50, 1.8, 2.85, 14.1, 18.1),   # seg 3: moves down
-    (0.4, 0.5, 1.8, 2.85, 1.8, 4.50, 19.1, 20.0),   # seg 4: moves up
+    # (0.4, 0.5, 1.8, 2.85, 1.8, 4.50,  0.1,  4.1),   # seg 0: moves up
+    # (0.4, 0.5, 1.8, 3.50, 1.8, 2.85,  4.1,  8.1),   # seg 1: moves down
+    # (0.4, 0.5, 1.8, 2.85, 1.8, 4.50, 10.1, 14.1),   # seg 2: moves up
+    # (0.4, 0.5, 1.8, 3.50, 1.8, 2.85, 14.1, 18.1),   # seg 3: moves down
+    # (0.4, 0.5, 1.8, 2.85, 1.8, 4.50, 19.1, 20.0),   # seg 4: moves up
 ]
 
 def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, save_path="./",
@@ -930,12 +935,12 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
             _xlo = max(_x, 0.0); _ylo = max(_y, 0.0)
             _xhi = min(_x + _w, 4.0); _yhi = min(_y + _h, 4.0)
             if _xhi > _xlo and _yhi > _ylo:
-                ax.add_patch(plt.Rectangle((_xlo, _ylo), _xhi - _xlo, _yhi - _ylo,
+                ax2.add_patch(plt.Rectangle((_xlo, _ylo), _xhi - _xlo, _yhi - _ylo,
                                         linewidth=1.5, edgecolor='white',
                                         facecolor='white', alpha=0.5, zorder=6))
  
         # Theta-v heatmap — vectorised
-        theta_vals = np.linspace(-np.pi*3, np.pi*3, 45)
+        theta_vals = np.linspace(-np.pi, np.pi, 15)
         v_vals     = np.linspace(Car.min_velocity, Car.max_velocity, 11)
         tg, vg = np.meshgrid(theta_vals, v_vals, indexing='ij')   # (100,100)
         n_pts  = tg.size
@@ -1144,7 +1149,7 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
 def main():
     nr  = 200
     Car = MPC_acados(nr)
-    Car.set_value_function("/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/out_bicycle4d_with_obs.npy")
+    Car.set_value_function("/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/10-20.npy")
 
     states          = [[0, 3.0, 0.5, np.pi/2, 0.0]]
     predicted_path  = []
@@ -1166,9 +1171,6 @@ def main():
         nu = Car.get_optimal_control()  # shape (2, N)
 
         next_state = [ns[i][1] for i in range(4)]
-        # while next_state[2] < -np.pi: next_state[2] += 2 * np.pi
-        # while next_state[2] >  np.pi: next_state[2] -= 2 * np.pi
-        next_state[2] = next_state[2] if abs(next_state[2]) <= np.pi * 1.2 else next_state[2] -np.sign(next_state[2]) * 2 * np.pi
 
         predicted_path.append(ns)
         predicted_input.append(nu)
