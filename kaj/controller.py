@@ -279,9 +279,7 @@ class Controller:
                 print(f"[acados] Warning: solver returned status {status}")
             # 6) Cache solution for warm-starting next time
             x_cached = np.array([self.solver.get(k, "x") for k in range(N + 1)])
-            theta = x_cached[:, 2]
-            wrap_mask = np.abs(theta) > np.pi
-            x_cached[wrap_mask, 2] -= np.sign(theta[wrap_mask]) * 2 * np.pi
+            x_cached[:, 2] = (x_cached[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
             self._sol.update(
                 x=x_cached,
                 u=np.array([self.solver.get(k, "u") for k in range(N)]),
@@ -343,7 +341,7 @@ class Controller:
         t_ks = time + np.arange(S) * TIMESTEP
 
         # Finite-difference step per state dimension
-        eps = np.array(HJ_GRID_DX) # * 0.25
+        eps = np.array(HJ_GRID_DX) * 0.5
 
         # ------------------------------------------------------------
         # 1) Assemble all query points for one batched V(...) call
