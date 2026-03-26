@@ -47,9 +47,9 @@ def get_param(name, seq=None):
     return PARAM[name] if seq is None else seq[PARAM[name]]
 
 HJ_TIMESTEP = 20/100
-HJ_GRID_MIN = (0.0, 0.0, -np.pi, 0.0)
-HJ_GRID_MAX = (4.0, 4.0, np.pi, 0.8)
-HJ_GRID_STP = (25, 25, 15, 11)
+HJ_GRID_MIN = (0.0, 0.0, -np.pi * 3, 0.0)
+HJ_GRID_MAX = (4.0, 4.0, np.pi * 3, 0.8)
+HJ_GRID_STP = (25, 25, 45, 11)
 HJ_GRID_DX = [(HJ_GRID_MAX[i] - HJ_GRID_MIN[i]) / (HJ_GRID_STP[i] - 1) for i in range(4)]
 
 class Controller:
@@ -961,7 +961,7 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
                                         facecolor='white', alpha=0.5, zorder=6))
  
         # Theta-v heatmap — vectorised
-        theta_vals = np.linspace(-np.pi, np.pi, 15)
+        theta_vals = np.linspace(-np.pi * 3, np.pi * 3, 45)
         v_vals     = np.linspace(Car.min_velocity, Car.max_velocity, 11)
         tg, vg = np.meshgrid(theta_vals, v_vals, indexing='ij')   # (100,100)
         n_pts  = tg.size
