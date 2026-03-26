@@ -28,7 +28,7 @@ class Verifier:
         self.state_queue = state_queue
         self.stop_event = stop_event
 
-        self.vf = np.load('../vf_data.npy', mmap_mode='r').copy()
+        self.vf = np.load('/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/out_bicycle4d_with_obs.npy', mmap_mode='r').copy()
         info = {'interval': (0.0, 20.0), 'name': 'foo'}
 
         self.registry['latest.info'] = info

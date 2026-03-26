@@ -1149,7 +1149,7 @@ def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, s
 def main():
     nr  = 200
     Car = MPC_acados(nr)
-    Car.set_value_function("/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/10-20.npy")
+    Car.set_value_function("/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/out_bicycle4d_with_obs.npy")
 
     states          = [[0, 3.0, 0.5, np.pi/2, 0.0]]
     predicted_path  = []
