@@ -65,6 +65,12 @@ class Verifier:
         self.registry['latest.info'] = info
         self.registry['foo.vf'] = self.vf
 
+        task = self.create_task()
+
+        out1 = TLT(task).realize(self.impl)
+
+        
+
         
 
     def close(self):
@@ -141,3 +147,17 @@ class Verifier:
 
         return obj
     
+    def create_task(self):
+
+        env = self.build_env()
+        static_obj = self.build_static_object()
+        moving_obj = self.build_moving_object()
+
+        goal_x, goal_y = 3.58, 3.46
+        goal_w, goal_h = 0.30, 0.36
+
+        target_set = BoundedSet(x=(goal_x, goal_x + goal_w), y=(goal_y, goal_y + goal_h))
+
+        task = UNTIL(Compl(env['static_env']), target_set)
+
+        return task
