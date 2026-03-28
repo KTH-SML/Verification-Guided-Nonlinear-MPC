@@ -17,8 +17,8 @@ def accum(params):
         i += size
 
 # Controller parameters
-N = 10
-TIMESTEP = 0.1
+N = 3
+TIMESTEP = 0.2
 
 # Model parameters
 L = 0.32   # Wheelbase length (m)
@@ -223,12 +223,12 @@ class Controller:
             vf,
             method="linear",
             bounds_error=False,
-            fill_value=None,   # extrapolate if slightly outside
+            fill_value=200,   # extrapolate if slightly outside
         )
 
     def get_optimal_states(self):
         xs = np.array([self.solver.get(k, "x") for k in range(N+1)]) # shape (N+1, NX)
-        xs[:, 2] = (xs[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
+        # xs[:, 2] = (xs[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
         return xs
 
     def get_optimal_inputs(self):
@@ -293,7 +293,7 @@ class Controller:
                 print(f"[acados] Warning: solver returned status {status}")
             # 6) Cache solution for warm-starting next time
             x_cached = np.array([self.solver.get(k, "x") for k in range(N + 1)])
-            x_cached[:, 2] = (x_cached[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
+            # x_cached[:, 2] = (x_cached[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
             self._sol.update(
                 x=x_cached,
                 u=np.array([self.solver.get(k, "u") for k in range(N)]),
@@ -351,7 +351,7 @@ class Controller:
         S = N + 1
 
         x_pred = np.asarray(x_pred, dtype=float).reshape(S, NX)
-        x_pred[:, 2] = (x_pred[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
+        # x_pred[:, 2] = (x_pred[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
         t_ks = time + np.arange(S) * TIMESTEP
 
         # Finite-difference step per state dimension
@@ -372,11 +372,11 @@ class Controller:
             
             # plus
             pts_list.append(np.column_stack([t_ks, x_pred + dx]))
-            pts_list[-1][:, 3] = (pts_list[-1][:, 3] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
+            # pts_list[-1][:, 3] = (pts_list[-1][:, 3] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
             
             # minus
             pts_list.append(np.column_stack([t_ks, x_pred - dx]))
-            pts_list[-1][:, 3] = (pts_list[-1][:, 3] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
+            # pts_list[-1][:, 3] = (pts_list[-1][:, 3] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
 
         all_pts = np.vstack(pts_list)       # shape ((1 + 2*NX)*S, NX+1)
 
@@ -432,7 +432,7 @@ class Controller:
             print("Waiting for latest.info from verifier...")
             tm.sleep(0.1)
 
-        for k in tqdm(range(200)):
+        for k in tqdm(range(100)):
             if self.stop_event.is_set():
                 return
 
@@ -806,248 +806,6 @@ def animate_vf_xy(controller, real_path, pred_path, save_path=None, obstacles=No
 
     return fig, (ax_xy_real, ax_xy_interp, ax_yv_real), anim
 
-
-def animate_heat_map_segment(Car, states, nr, predicted_path, costs_list=None, save_path="./",
-                             used_sets=None, file_path=None):
-    """
-    逐帧渲染并保存为 PNG（存入 save_path/frames/），
-    所有帧保存完毕后用 Pillow 合并成 GIF 动画。
- 
-    优点：
-      - 每帧独立 figure，渲染后立即 plt.close()，内存峰值低
-      - 可中断续跑（已存在的帧直接跳过）
-      - 不依赖 ffmpeg，仅需 Pillow
-    used_sets : list[int], 长度 >= nr，每步对应使用的 dataset 编号
-    file_path : list[str]，dataset 编号 → npy 文件路径的映射
-    """
-    import glob
-    from PIL import Image as PILImage
- 
-    print("Animating heat map for interpolation segmentation")
- 
-    # 跟踪当前已加载的 dataset，按需切换，避免重复 IO
-    _active_dataset = [None]
- 
-    def _ensure_dataset(index_t):
-        if used_sets is None or file_path is None:
-            return
-        ds = used_sets[index_t]
-        if ds != _active_dataset[0]:
-            Car.set_value_function(file_path[ds])
-            _active_dataset[0] = ds
- 
-    # ── 确定输出 GIF 文件名 ────────────────────────────────────────────────
-    if USE_HJ_LINEAR:
-        gif_name = "animation_seg_4D_acados_heuristic_linear.gif"
-    elif USE_HJ_DIAG_QUADRATIC:
-        gif_name = "animation_seg_4D_acados_heuristic_diagonal.gif"
-    elif USE_HJ_FULL_QUADRATIC:
-        gif_name = "animation_seg_4D_acados_heuristic_full.gif"
-    else:
-        raise RuntimeError("No HJ surrogate mode selected.")
- 
-    frames_dir = os.path.join(save_path, "frames")
-    os.makedirs(frames_dir, exist_ok=True)
- 
-    # ── 逐帧渲染并保存 PNG ────────────────────────────────────────────────
-    progress = tqdm(total=nr, desc="Rendering frames")
-    for index_t in range(nr):
-        frame_path = os.path.join(frames_dir, f"frame_{index_t:04d}.png")
-        if os.path.exists(frame_path):
-            # 支持断点续跑：已有帧直接跳过
-            progress.update(1)
-            continue
- 
-        _ensure_dataset(index_t)
- 
-        V_interpolated_seg = Car.interpolate_V_segment(states[index_t], dyn.prediction_horizon)
-        V_seg = Car.value_function # not interpolated
- 
-        fig = plt.figure(figsize=(18, 10))
-        ax  = fig.add_subplot(2, 3, 1)
-        ax2 = fig.add_subplot(2, 3, 2)
-        ax3 = fig.add_subplot(2, 3, 3)
-        ax4 = fig.add_subplot(2, 1, 2)   # Time vs Cost — full bottom row
- 
-        t     = states[index_t][0]
-        x     = states[index_t][1]
-        y     = states[index_t][2]
-        theta = states[index_t][3]
-        v     = states[index_t][4]
-        # delta = states[index_t][5]
- 
-        _it, _ix, _iy, _ith, _iv = Car.coord_to_index([t, x, y, theta, v])
- 
-        # XY heatmap — vectorised
-        x_vals = np.linspace(Car.X0, Car.X0 + Car.XN, 25)
-        y_vals = np.linspace(Car.Y0, Car.Y0 + Car.YN, 25)
-        xg, yg = np.meshgrid(x_vals, y_vals, indexing='ij')   # (100,100)
-        n_pts  = xg.size
-        pts_xy = np.column_stack([
-            np.full(n_pts, t), xg.ravel(), yg.ravel(),
-            np.full(n_pts, theta), np.full(n_pts, v)
-        ])
-        # Z_xy = V_interpolated_seg(pts_xy).reshape(100, 100)
-        Z_xy = V_seg[_it, :, :, _ith, _iv]
- 
-        _zmin_xy, _zmax_xy = Z_xy.min(), Z_xy.max()
-        if _zmax_xy - _zmin_xy > 1e-10:
-            ax.contourf(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 50), cmap="viridis")
-            ax.contour(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 10), colors="black", linewidths=0.5)
-        else:
-            ax.contourf(x_vals, y_vals, Z_xy.T, levels=1, cmap="viridis")
-        if Z_xy.max() > 0 and Z_xy.min() < 0:
-            ax.contour(x_vals, y_vals, Z_xy.T, levels=[0], colors="red", linewidths=2.0)
-        ax.set_xlabel('X-axis');  ax.set_ylabel('Y-axis')
-        ax.set_title('Value Function (X vs Y)');  ax.axis('equal')
-        ax.plot(predicted_path[index_t][0], predicted_path[index_t][1], "yo")
-        ax.plot(x, y, "ro")
-        for _ox, _oy, _ow, _oh in OBSTACLES:
-            ax.add_patch(plt.Rectangle((_ox, _oy), _ow, _oh,
-                                       linewidth=1.5, edgecolor='white',
-                                       facecolor='gray', alpha=0.6, zorder=5))
-        for _w, _h, _x0, _y0, _x1, _y1, _t0, _t1 in MOVING_OBSTACLES:
-            if not (_t0 <= t <= _t1):
-                continue
-            _alpha = (t - _t0) / (_t1 - _t0)
-            _x = _x0 + _alpha * (_x1 - _x0)
-            _y = _y0 + _alpha * (_y1 - _y0)
-            _xlo = max(_x, 0.0); _ylo = max(_y, 0.0)
-            _xhi = min(_x + _w, 4.0); _yhi = min(_y + _h, 4.0)
-            if _xhi > _xlo and _yhi > _ylo:
-                ax.add_patch(plt.Rectangle((_xlo, _ylo), _xhi - _xlo, _yhi - _ylo,
-                                        linewidth=1.5, edgecolor='white',
-                                        facecolor='white', alpha=0.5, zorder=6))
- 
- 
-        # XY heatmap — vectorised: build all query points at once
-        x_vals = np.linspace(Car.X0, Car.X0 + Car.XN, 100)
-        y_vals = np.linspace(Car.Y0, Car.Y0 + Car.YN, 100)
-        xg, yg = np.meshgrid(x_vals, y_vals, indexing='ij')   # (100,100)
-        n_pts  = xg.size
-        pts_xy = np.column_stack([
-            np.full(n_pts, t), xg.ravel(), yg.ravel(),
-            np.full(n_pts, theta), np.full(n_pts, v)
-        ])
-        Z_xy = V_interpolated_seg(pts_xy).reshape(100, 100)
- 
-        _zmin_xy, _zmax_xy = Z_xy.min(), Z_xy.max()
-        if _zmax_xy - _zmin_xy > 1e-10:
-            c = ax2.contourf(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 50), cmap="viridis")
-            ax2.contour(x_vals, y_vals, Z_xy.T, levels=np.linspace(_zmin_xy, _zmax_xy, 10), colors="black", linewidths=0.5)
-        else:
-            c = ax2.contourf(x_vals, y_vals, Z_xy.T, levels=1, cmap="viridis")
-        if Z_xy.max() > 0 and Z_xy.min() < 0:
-            ax2.contour(x_vals, y_vals, Z_xy.T, levels=[0], colors="red", linewidths=2.0)
-        ax2.set_xlabel('X-axis');  ax2.set_ylabel('Y-axis')
-        ax2.set_title('Value Function (X vs Y)');  ax2.axis('equal')
-        ax2.plot(predicted_path[index_t][0], predicted_path[index_t][1], "yo")
-        ax2.plot(x, y, "ro")
-        for _ox, _oy, _ow, _oh in OBSTACLES:
-            ax2.add_patch(plt.Rectangle((_ox, _oy), _ow, _oh,
-                                        linewidth=1.5, edgecolor='white',
-                                        facecolor='gray', alpha=0.6, zorder=5))
-        for _w, _h, _x0, _y0, _x1, _y1, _t0, _t1 in MOVING_OBSTACLES:
-            if not (_t0 <= t <= _t1):
-                continue
-            _alpha = (t - _t0) / (_t1 - _t0)
-            _x = _x0 + _alpha * (_x1 - _x0)
-            _y = _y0 + _alpha * (_y1 - _y0)
-            _xlo = max(_x, 0.0); _ylo = max(_y, 0.0)
-            _xhi = min(_x + _w, 4.0); _yhi = min(_y + _h, 4.0)
-            if _xhi > _xlo and _yhi > _ylo:
-                ax2.add_patch(plt.Rectangle((_xlo, _ylo), _xhi - _xlo, _yhi - _ylo,
-                                        linewidth=1.5, edgecolor='white',
-                                        facecolor='white', alpha=0.5, zorder=6))
- 
-        # Theta-v heatmap — vectorised
-        theta_vals = np.linspace(-np.pi * 3, np.pi * 3, 45)
-        v_vals     = np.linspace(Car.min_velocity, Car.max_velocity, 11)
-        tg, vg = np.meshgrid(theta_vals, v_vals, indexing='ij')   # (100,100)
-        n_pts  = tg.size
-        pts_tv = np.column_stack([
-            np.full(n_pts, t), np.full(n_pts, x), np.full(n_pts, y),
-            tg.ravel(), vg.ravel()
-        ])
-        # Z_tv = V_interpolated_seg(pts_tv).reshape(100, 100)
-        Z_tv = V_seg[_it, _ix, _iy, :, :]
- 
-        _zmin_tv, _zmax_tv = Z_tv.min(), Z_tv.max()
-        if _zmax_tv - _zmin_tv > 1e-10:
-            ax3.contourf(theta_vals, v_vals, Z_tv.T, levels=np.linspace(_zmin_tv, _zmax_tv, 50), cmap="viridis")
-            ax3.contour(theta_vals, v_vals, Z_tv.T, levels=np.linspace(_zmin_tv, _zmax_tv, 10), colors="black", linewidths=0.5)
-        else:
-            ax3.contourf(theta_vals, v_vals, Z_tv.T, levels=1, cmap="viridis")
-        if Z_tv.max() > 0 and Z_tv.min() < 0:
-            ax3.contour(theta_vals, v_vals, Z_tv.T, levels=[0], colors="red", linewidths=2.0)
-        ax3.set_xlabel('Theta');  ax3.set_ylabel('Velocity')
-        ax3.set_title('Value Function (Theta vs V)')
-        ax3.plot(predicted_path[index_t][2], predicted_path[index_t][3], "yo")
-        ax3.plot(theta, v, "ro")
- 
-        # 分割框
-        seg = Car.grids_segment_list
-        ax.plot(
-            [seg[index_t][1][0], seg[index_t][1][-1], seg[index_t][1][-1],
-             seg[index_t][1][0], seg[index_t][1][0]],
-            [seg[index_t][2][0], seg[index_t][2][0], seg[index_t][2][-1],
-             seg[index_t][2][-1], seg[index_t][2][0]], "y"
-        )
-        ax2.plot(
-            [seg[index_t][1][0], seg[index_t][1][-1], seg[index_t][1][-1],
-             seg[index_t][1][0], seg[index_t][1][0]],
-            [seg[index_t][2][0], seg[index_t][2][0], seg[index_t][2][-1],
-             seg[index_t][2][-1], seg[index_t][2][0]], "y"
-        )
-        ax3.plot(
-            [seg[index_t][3][0], seg[index_t][3][-1], seg[index_t][3][-1],
-             seg[index_t][3][0], seg[index_t][3][0]],
-            [seg[index_t][4][0], seg[index_t][4][0], seg[index_t][4][-1],
-             seg[index_t][4][-1], seg[index_t][4][0]], "y"
-        )
- 
-        # ---------- Time vs Cost subplot ----------
-        if costs_list is not None:
-            time_axis     = np.arange(len(costs_list)) * Car.dt
-            current_costs = [c[0] for c in costs_list]
-            ax4.plot(time_axis, current_costs, color='steelblue', linewidth=1.5, label='V(current state)')
-            ax4.axhline(0, color='black', linestyle='--', linewidth=1)
-            if index_t < len(costs_list):
-                ax4.axvline(time_axis[index_t], color='red', linestyle='--', linewidth=1.5,
-                            label=f't = {time_axis[index_t]:.2f} s')
-                ax4.plot(time_axis[index_t], current_costs[index_t], 'ro', markersize=7)
-            ax4.set_xlabel('Time (s)')
-            ax4.set_ylabel('HJ Value V(x)')
-            ax4.set_title('Time vs HJ Cost  (V ≤ 0 = safe)')
-            ax4.legend(loc='upper right', fontsize=8)
-            ax4.grid(True, alpha=0.4)
-        # ------------------------------------------
- 
-        fig.tight_layout()
-        fig.savefig(frame_path, dpi=100)
-        plt.close(fig)
-        progress.update(1)
- 
-    progress.close()
- 
-    print("Assembling GIF from frames...")
-    frame_paths = sorted(glob.glob(os.path.join(frames_dir, "frame_*.png")))
-    if not frame_paths:
-        raise RuntimeError(f"No frames found in {frames_dir}")
- 
-    pil_frames = [PILImage.open(fp).convert("RGB") for fp in frame_paths]
-    gif_path = os.path.join(save_path, gif_name)
-    pil_frames[0].save(
-        gif_path,
-        save_all=True,
-        append_images=pil_frames[1:],
-        loop=0,
-        duration=100,   # 100 ms / frame → 10 fps
-        optimize=False,
-    )
-    for img in pil_frames:
-        img.close()
-    print(f"GIF saved → {gif_path}  ({len(pil_frames)} frames)")
 
 def animate_heat_map_global(
     controller,
