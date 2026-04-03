@@ -1,0 +1,109 @@
+from math import pi
+
+
+# ------------------------------------------------------------------
+# Vehicle
+# ------------------------------------------------------------------
+
+WHEELBASE = 0.32   # m
+
+# Verifier (HJ reachability) limits
+MAX_VEL_VERIFIER   = 0.8    # m/s
+MAX_ACCEL_VERIFIER = 0.6    # m/s^2
+MAX_STEER_VERIFIER = 0.6    # rad
+
+# MPC (controller) limits
+MAX_VEL_MPC        = 0.8    # m/s
+MAX_ACCEL_MPC      = 0.8    # m/s^2
+MAX_STEER_MPC      = 0.7    # rad
+
+# ------------------------------------------------------------------
+# Verifier (HJ reachability)
+# ------------------------------------------------------------------
+
+HJ_TIMESTEP = 0.2    # s
+HJ_HORIZON  = 20.0   # s
+
+# ------------------------------------------------------------------
+# MPC (controller)
+# ------------------------------------------------------------------
+
+MPC_TIMESTEP = 0.1  # s
+MPC_N        = 10     # horizon steps  →  total horizon = N * TIMESTEP = 0.6 s
+Qhj          = 10.0        # cost weight for HJ value function guidance
+
+# ------------------------------------------------------------------
+# Map
+# X0, Y0: Lower-left corner of the map
+# XW, YW: Upper-right corner of the map is (XW, YW)
+# Obstacles
+# Each entry: (x_min, y_min, width, height)
+# Matches the BoundedSet geometry in verifier.build_env() and
+# the _draw_obstacles() format used in controller animations.
+# ------------------------------------------------------------------
+
+X0, Y0 = 0.0, 0.0
+XW, YW = 4.0, 4.0
+
+OBSTACLES = [
+    (0.0, 0.0, 2.0, 2.0),   # box_area:  x=[0.01,2.0], y=[0.01,2.0]
+    (1.2, 2.8, 2.8, 0.4),   # thin_wall: x=[1.2, ...], y=[2.8, 3.2]
+]
+
+# Goal region: (x_min, y_min, width, height)
+GOAL = (3.58, 3.46, 0.30, 0.36)
+
+# State-space axes (spatial only, no time)
+# '*' prefix means periodic (pyspect convention);
+# consumers triple-concat yaw to extend from [-pi, pi] to [-3pi, 3pi]
+points = (25, 25, 15, 11)  # number of grid points for each axis (x,y,yaw,vel)
+AXES = [
+    dict(name='t',    bounds=[0.0, HJ_HORIZON], step=HJ_TIMESTEP),
+    dict(name='x',    bounds=[X0, XW],          points=points[0]),
+    dict(name='y',    bounds=[Y0, YW],          points=points[1]),
+    dict(name='*yaw', bounds=[-pi, pi],         points=points[2]),
+    dict(name='vel',  bounds=[0.0, MAX_VEL_VERIFIER],    points=points[3]),
+]
+
+# ------------------------------------------------------------------
+# Registry interface
+# ------------------------------------------------------------------
+
+def run(registry):
+    """Write all shared configuration into the registry.
+    Called by Runtime before any subprocess is started.
+    """
+    registry['config'] = dict(
+        # Vehicle
+        wheelbase    = WHEELBASE,
+        # Map
+        X0           = X0,
+        Y0           = Y0,
+        XW           = XW,
+        YW           = YW,
+        # Verifier
+        verifier = dict(
+            # Vehicle
+            max_steer    = MAX_STEER_VERIFIER,
+            max_accel    = MAX_ACCEL_VERIFIER,
+            max_vel      = MAX_VEL_VERIFIER,
+            # HJ reachability
+            timestep  = HJ_TIMESTEP,
+            horizon   = HJ_HORIZON,
+            axes         = AXES,
+        ),
+        # MPC
+        controller = dict(
+            # Vehicle
+            max_vel      = MAX_VEL_MPC,
+            max_accel    = MAX_ACCEL_MPC,
+            max_steer    = MAX_STEER_MPC,
+            # MPC parameters
+            timestep = MPC_TIMESTEP,
+            n        = MPC_N,
+            qhj      = Qhj,
+        ),
+        # Environment
+        obstacles    = OBSTACLES,
+        goal         = GOAL,
+    )

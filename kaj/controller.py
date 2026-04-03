@@ -1,4 +1,3 @@
-
 from tqdm import tqdm
 
 import os
@@ -7,7 +6,6 @@ import time as tm
 import numpy as np
 import casadi as ca
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from scipy.interpolate import RegularGridInterpolator
 
 def accum(params):
     i = 0
@@ -15,13 +13,6 @@ def accum(params):
         name, size = (p, 1) if isinstance(p, str) else p
         yield name, slice(i, i+size)
         i += size
-
-# Controller parameters
-N = 3
-TIMESTEP = 0.2
-
-# Model parameters
-L = 0.32   # Wheelbase length (m)
 
 STATE = {name: s for name, s in accum(["x", "y", "yaw", "vel"])}
 NX = max(s.stop for s in STATE.values())
@@ -46,22 +37,8 @@ NP = max(s.stop for s in PARAM.values())
 def get_param(name, seq=None):
     return PARAM[name] if seq is None else seq[PARAM[name]]
 
-HJ_TIMESTEP = 20/100
-HJ_GRID_MIN = (0.0, 0.0, -np.pi * 3, 0.0)
-HJ_GRID_MAX = (4.0, 4.0, np.pi * 3, 0.8)
-HJ_GRID_STP = (25, 25, 45, 11)
-HJ_GRID_DX = [(HJ_GRID_MAX[i] - HJ_GRID_MIN[i]) / (HJ_GRID_STP[i] - 1) for i in range(4)]
 
 class Controller:
-
-    min_velocity = 0.0
-    max_velocity = 0.8
-    min_acceleration = -0.8
-    max_acceleration = 0.8
-    min_steering = -np.deg2rad(40)
-    max_steering = np.deg2rad(40)
-
-    Qhj = 10.0
 
     def __init__(self, registry, state_queue, stop_event):
 
@@ -69,11 +46,39 @@ class Controller:
         self.registry = registry
         self.state_queue = state_queue
         self.stop_event = stop_event
-        
+
+        self.config = self.registry['config']
+
+        # Controller parameters
+        self.N = self.config['controller']['n']
+        self.TIMESTEP = self.config['controller']['timestep']
+        self.Qhj = self.config['controller']['qhj']
+
+        # Model parameters
+        self.L = 0.32   # Wheelbase length (m)
+        self.min_velocity = 0.0
+        self.max_velocity = self.config['controller']['max_vel']
+        self.min_acceleration = self.config['controller']['max_accel'] * -1
+        self.max_acceleration = self.config['controller']['max_accel']
+        self.min_steering = self.config['controller']['max_steer'] * -1
+        self.max_steering = self.config['controller']['max_steer']
+
+        self.HJ_TIMESTEP = self.config['verifier']['timestep']
+        self.HJ_GRID_MIN = [axis['bounds'][0] for axis in self.config['verifier']['axes'] if axis['name'] != 't']
+        self.HJ_GRID_MAX = [axis['bounds'][1] for axis in self.config['verifier']['axes'] if axis['name'] != 't']
+        self.HJ_GRID_STP = [axis['points'] for axis in self.config['verifier']['axes'] if axis['name'] != 't']
+        self.HJ_GRID_DX = [(self.HJ_GRID_MAX[i] - self.HJ_GRID_MIN[i]) / (self.HJ_GRID_STP[i] - 1) for i in range(4)]
+
+        # Precompute spatial grids for direct indexing
+        self.spatial_grids = [
+            np.linspace(self.HJ_GRID_MIN[i], self.HJ_GRID_MAX[i], self.HJ_GRID_STP[i])
+            for i in range(NX)
+        ]
+
         self.solver = self._init_acados_solver()
         self._sol = {
-            'x': np.zeros((N + 1, NX)),
-            'u': np.zeros((N, NU)),
+            'x': np.zeros((self.N + 1, NX)),
+            'u': np.zeros((self.N, NU)),
             'healthy': False,  # Flag to indicate if the solver has found a healthy solution before
         }
 
@@ -86,12 +91,12 @@ class Controller:
         ocp = self._init_acados_ocp(model)
 
         # Solver options
-        ocp.solver_options.tf                  = N * TIMESTEP
-        ocp.solver_options.N_horizon           = N
+        ocp.solver_options.tf                  = self.N * self.TIMESTEP
+        ocp.solver_options.N_horizon           = self.N
         ocp.solver_options.integrator_type     = "DISCRETE"
         ocp.solver_options.nlp_solver_type     = "SQP_RTI"   # Real-Time Iteration
         ocp.solver_options.qp_solver           = "PARTIAL_CONDENSING_HPIPM"
-        ocp.solver_options.qp_solver_cond_N    = N
+        ocp.solver_options.qp_solver_cond_N    = self.N
         # GAUSS_NEWTON: constructs the Hessian from first-order cost information
         # only, guaranteeing positive-semidefiniteness and eliminating HPIPM
         # ACADOS_MINSTEP failures caused by the indefinite second-order HJ terms
@@ -119,16 +124,15 @@ class Controller:
         _input = lambda name: get_input(name, model.u)
 
         # Parameters
-        # ???
         model.p = ca.vertcat(*[ca.SX.sym(param, s.stop - s.start)
                                for param, s in PARAM.items()])
         _param = lambda name: get_param(name, model.p)
 
         # Dynamics
-        dt = TIMESTEP    
+        dt = self.TIMESTEP    
         f_x     = _state("x") + dt * _state("vel") * ca.cos(_state("yaw"))
         f_y     = _state("y") + dt * _state("vel") * ca.sin(_state("yaw"))
-        f_th    = _state("yaw") + dt * _state("vel") * ca.tan(_input("steer")) / L
+        f_th    = _state("yaw") + dt * _state("vel") * ca.tan(_input("steer")) / self.L
         f_v     = _state("vel") + dt * _input("accel")
         model.disc_dyn_expr = ca.vertcat(f_x, f_y, f_th, f_v)
 
@@ -180,7 +184,7 @@ class Controller:
         ocp.constraints.x0 = np.zeros(NX)
 
         return ocp
-    
+
     def update_current_valuefunc(self, time, state):
 
         self.registry['time'] = time
@@ -189,67 +193,104 @@ class Controller:
         info = self.registry['latest.info']
 
         if info['name'] != self.latest_info['name'] and info['interval'][0] <= time <= info['interval'][1]:
-            print(f"Controller: Detected new info '{info['name']}' from verifier, updating value function interpolator.")
+            print(f"Controller: Detected new info '{info['name']}' from verifier, updating value function.")
             
             self.latest_info = info
             self.latest_vf = self.registry[info['name'] + '.vf']
-            
-            self.update_vf_interpolator(self.latest_vf, info)
-    
-    def update_vf_interpolator(self, vf, info):
+
+            # Build time grid for direct indexing
+            t0 = info['interval'][0]
+            HJ_NT = self.latest_vf.shape[0]
+            self.vf_time_grid = t0 + np.arange(HJ_NT) * self.HJ_TIMESTEP
+
+    def _current_set_idx(self) -> int:
+        """Return the set_idx of the currently active verification set, or -1 if unknown."""
+        tl = self.registry.get('verifier.timeline', [])
+        for entry in reversed(tl):
+            if list(self.latest_info.get('interval', [])) == entry.get('interval'):
+                return entry['set_idx']
+        return -1
+
+    def _query_vf(self, t_pts, x_pts):
         """
-        vf: ndarray, shape (HJ_NT, HJ_NX_1, HJ_NX_2, ..., HJ_NX_n)
-        info:
-        - interval = (t0, tf)
-        - step = dt
-        - grids = [x1_grid, x2_grid, ..., xn_grid]   # required
-            OR equivalent per-axis bounds from which grids can be built
+        5D local linear interpolation on the value function ndarray.
+        yaw (spatial dim 2) is treated as periodic on [-π, π].
+
+        Parameters
+        ----------
+        t_pts : ndarray, shape (M,)
+        x_pts : ndarray, shape (M, NX)
+
+        Returns
+        -------
+        vals : ndarray, shape (M,)
         """
-        dt = HJ_TIMESTEP
-        t0, tf = info["interval"]
+        vf = self.latest_vf   # shape (NT, N0, N1, N2, N3)
+        M  = len(t_pts)
 
-        HJ_NT = vf.shape[0]
-        time_grid = t0 + np.arange(HJ_NT) * dt
+        # All 5 grids: [time, x, y, yaw, vel]
+        grids = [self.vf_time_grid, *self.spatial_grids]
+        shape = vf.shape   # (NT, N0, N1, N2, N3)
 
-        # Preferred: explicit spatial grids
-        spatial_grids = [
-            np.linspace(HJ_GRID_MIN[i], HJ_GRID_MAX[i], HJ_GRID_STP[i])
-            for i in range(NX)
-        ]
-        points = (time_grid, *spatial_grids)
+        # Wrap yaw to [-π, π] before interpolation
+        x_pts = x_pts.copy()
+        x_pts[:, 2] = (x_pts[:, 2] + np.pi) % (2 * np.pi) - np.pi
 
-        self.vf_interp = RegularGridInterpolator(
-            points,
-            vf,
-            method="linear",
-            bounds_error=False,
-            fill_value=200,   # extrapolate if slightly outside
-        )
+        all_pts = np.column_stack([t_pts, x_pts])  # (M, 5)
+
+        idx0    = np.zeros((5, M), dtype=int)
+        idx1    = np.zeros((5, M), dtype=int)
+        w1      = np.zeros((5, M), dtype=float)   # weight toward right neighbor
+
+        for d in range(5):
+            g  = grids[d]
+            dx = g[1] - g[0]
+            i0 = np.floor((all_pts[:, d] - g[0]) / dx).astype(int)
+            i0 = np.clip(i0, 0, shape[d] - 2)
+            alpha = np.clip((all_pts[:, d] - g[i0]) / dx, 0.0, 1.0)
+
+            if d == 3:  # yaw: periodic — right neighbor wraps to index 0 at boundary
+                i1 = np.where(i0 == shape[d] - 2,
+                            np.zeros(M, dtype=int),   # wrap: last cell right → index 0
+                            i0 + 1)
+            else:
+                i1 = i0 + 1
+
+            idx0[d] = i0
+            idx1[d] = i1
+            w1[d]   = alpha
+
+        # 2^5 = 32 corner combinations
+        result = np.zeros(M, dtype=float)
+        for bits in range(32):
+            weight = np.ones(M, dtype=float)
+            idxs   = []
+            for d in range(5):
+                if (bits >> d) & 1:
+                    weight *= w1[d]
+                    idxs.append(idx1[d])
+                else:
+                    weight *= (1.0 - w1[d])
+                    idxs.append(idx0[d])
+            result += weight * vf[idxs[0], idxs[1], idxs[2], idxs[3], idxs[4]]
+
+        return result
 
     def get_optimal_states(self):
-        xs = np.array([self.solver.get(k, "x") for k in range(N+1)]) # shape (N+1, NX)
-        # xs[:, 2] = (xs[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
+        xs = np.array([self.solver.get(k, "x") for k in range(self.N+1)]) # shape (N+1, NX)
         return xs
 
     def get_optimal_inputs(self):
-        return np.array([self.solver.get(k, "u") for k in range(N)]) # shape (N, NU)
+        return np.array([self.solver.get(k, "u") for k in range(self.N)]) # shape (N, NU)
 
     def evaluate_real_cost(self, time, state):
-        #nearest index in VF tensor
-        t0, tf = self.latest_info['interval']
-        z = [time, *state]
-        d = [HJ_TIMESTEP, *HJ_GRID_DX]
-        m = [t0, *HJ_GRID_MIN]
-        idx = tuple(
-            int(np.argmin(np.abs(np.arange(self.latest_vf.shape[i]) * d[i] + m[i] - z[i])))
-            for i in range(NX+1)
-        )
-        return float(self.latest_vf[idx])
+        t_pts = np.array([time])
+        x_pts = np.array(state, dtype=float).reshape(1, NX)
+        return float(self._query_vf(t_pts, x_pts)[0])
 
     def evaluate_interp_cost(self, time, state):
-        z = np.array([time, *state], dtype=float)
-        return float(self.vf_interp(z)[0])
-    
+        return self.evaluate_real_cost(time, state)
+
     def compute_control(self, time, state):
 
         state = np.asarray(state, dtype=float).reshape(NX)
@@ -267,14 +308,14 @@ class Controller:
         x_pred = self._predict_states(state)
         stage_params = self._build_stage_params(time, x_pred)
 
-        for k in range(N + 1):
+        for k in range(self.N + 1):
             self.solver.set(k, "p", stage_params[k])
 
         # 3) Warm-start from previous solution if available
         if self._sol['healthy']:
-            for k in range(N + 1):
+            for k in range(self.N + 1):
                 self.solver.set(k, "x", self._sol["x"][k])
-            for k in range(N):
+            for k in range(self.N):
                 self.solver.set(k, "u", self._sol["u"][k])
 
         # 4) Solve OCP
@@ -292,11 +333,10 @@ class Controller:
             if status not in (0, 1):
                 print(f"[acados] Warning: solver returned status {status}")
             # 6) Cache solution for warm-starting next time
-            x_cached = np.array([self.solver.get(k, "x") for k in range(N + 1)])
-            # x_cached[:, 2] = (x_cached[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
+            x_cached = np.array([self.solver.get(k, "x") for k in range(self.N + 1)])
             self._sol.update(
                 x=x_cached,
-                u=np.array([self.solver.get(k, "u") for k in range(N)]),
+                u=np.array([self.solver.get(k, "u") for k in range(self.N)]),
                 healthy=(status in (0, 1)),
             )
 
@@ -313,19 +353,19 @@ class Controller:
         return state
     
     def _predict_states(self, x0):
-        x_pred = np.zeros((N+1, NX))
+        x_pred = np.zeros((self.N+1, NX))
         x_pred[0] = x0
 
         if self._sol['healthy']:
             prev_x = self._sol['x']
-            for k in range(1, N+1):
-                x_pred[k] = prev_x[min(k, N)]
+            for k in range(1, self.N+1):
+                x_pred[k] = prev_x[min(k, self.N)]
         else:
-            for k in range(N):
+            for k in range(self.N):
                 x = x_pred[k]
                 x_pred[k + 1] = np.array([
-                    x[0] + TIMESTEP * x[3] * np.cos(x[2]),
-                    x[1] + TIMESTEP * x[3] * np.sin(x[2]),
+                    x[0] + self.TIMESTEP * x[3] * np.cos(x[2]),
+                    x[1] + self.TIMESTEP * x[3] * np.sin(x[2]),
                     x[2],
                     x[3],
                 ])
@@ -337,7 +377,7 @@ class Controller:
         Build per-stage linear HJ surrogate parameters.
 
         For each stage k:
-            t_k   = time + k * TIMESTEP
+            t_k    = time + k * TIMESTEP
             xbar_k = x_pred[k]
             a_k    = V(t_k, xbar_k)
             b_k    = grad_x V(t_k, xbar_k)   (central finite differences)
@@ -348,40 +388,38 @@ class Controller:
             Each row is:
                 p_k = [xbar_k(4), a_k(1), b_k(4)]
         """
-        S = N + 1
+        S = self.N + 1
 
         x_pred = np.asarray(x_pred, dtype=float).reshape(S, NX)
-        # x_pred[:, 2] = (x_pred[:, 2] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
-        t_ks = time + np.arange(S) * TIMESTEP
+        t_ks = time + np.arange(S) * self.TIMESTEP
 
         # Finite-difference step per state dimension
-        eps = np.array(HJ_GRID_DX) * 0.5
+        eps = np.array(self.HJ_GRID_DX) * 0.5
 
         # ------------------------------------------------------------
-        # 1) Assemble all query points for one batched V(...) call
+        # 1) Assemble all query points for one batched _query_vf call
         # ------------------------------------------------------------
-        pts_list = []
+        pts_t = []
+        pts_x = []
 
-        # center points: (S, NX+1) = [t, x, y, yaw, vel]
-        pts_list.append(np.column_stack([t_ks, x_pred]))
+        # center points
+        pts_t.append(t_ks)
+        pts_x.append(x_pred)
 
         # +/- perturbations for each state dimension
         for i in range(NX):
             dx = np.zeros((S, NX), dtype=float)
             dx[:, i] = eps[i]
-            
-            # plus
-            pts_list.append(np.column_stack([t_ks, x_pred + dx]))
-            # pts_list[-1][:, 3] = (pts_list[-1][:, 3] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
-            
-            # minus
-            pts_list.append(np.column_stack([t_ks, x_pred - dx]))
-            # pts_list[-1][:, 3] = (pts_list[-1][:, 3] + np.pi) % (2 * np.pi) - np.pi  # Wrap yaw to [-pi, pi]
+            pts_t.append(t_ks)
+            pts_x.append(x_pred + dx)
+            pts_t.append(t_ks)
+            pts_x.append(x_pred - dx)
 
-        all_pts = np.vstack(pts_list)       # shape ((1 + 2*NX)*S, NX+1)
+        all_t = np.concatenate(pts_t)           # shape ((1 + 2*NX)*S,)
+        all_x = np.vstack(pts_x)                # shape ((1 + 2*NX)*S, NX)
 
-        # Single batched interpolator evaluation
-        all_vals = self.vf_interp(all_pts)  # shape ((1 + 2*NX)*S,)
+        # Single batched query
+        all_vals = self._query_vf(all_t, all_x)
 
         # ------------------------------------------------------------
         # 2) Unpack values
@@ -392,10 +430,8 @@ class Controller:
 
         v_pm = []
         for i in range(NX):
-            v_plus  = all_vals[idx:idx + S]
-            idx += S
-            v_minus = all_vals[idx:idx + S]
-            idx += S
+            v_plus  = all_vals[idx:idx + S];  idx += S
+            v_minus = all_vals[idx:idx + S];  idx += S
             v_pm.append((v_plus, v_minus))
 
         # ------------------------------------------------------------
@@ -426,21 +462,34 @@ class Controller:
         real_cost   = []
         interp_cost = []
 
+        # Timeline: list of set_idx used at each MPC step (index k → used set)
+        used_sets: list = []
+
         while self.registry.get("latest.info") is None:
             if self.stop_event.is_set():
                 return
-            print("Waiting for latest.info from verifier...")
             tm.sleep(0.1)
 
-        for k in tqdm(range(100)):
+        hj_horizon = self.config['verifier']['horizon']
+        number_of_steps = int(hj_horizon / self.TIMESTEP)
+
+        for k in tqdm(range(number_of_steps), desc="Controller loop"):
+            start_time = tm.time()
             if self.stop_event.is_set():
                 return
-
+            
             t = real_path[-1][0]
             x = real_path[-1][1:]
 
             u0 = self.compute_control(t, x)
             input_hist.append(u0)
+
+            # Record which verification set was active this step
+            used_sets.append(self._current_set_idx())
+            self.registry['controller.timeline'] = {
+                'mpc_dt':    self.TIMESTEP,
+                'used_sets': list(used_sets),
+            }
 
             pred_traj = self.get_optimal_states()
             pred_path.append(pred_traj)
@@ -451,679 +500,70 @@ class Controller:
             real_cost.append(self.evaluate_real_cost(t, x))
             interp_cost.append(self.evaluate_interp_cost(t, x))
 
-            real_path.append([t + TIMESTEP] + list(next_state))
+            real_path.append([t + self.TIMESTEP] + list(next_state))
 
-        # plot_vf_xy_slice(
-        #     controller=self,
-        #     time=real_path[-1][0],
-        #     state=real_path[-1][1:],
-        #     save_path="vf_xy.png",
-        #     obstacles=OBSTACLES,
-        # )
+            end_time = tm.time()
 
-        # plot_vf_yaw_vel_slice(
-        #     controller=self,
-        #     time=real_path[-1][0],
-        #     state=real_path[-1][1:],
-        #     save_path="vf_yaw_vel.png",
-        # )
+            tm.sleep(max(0.0, 0.1 - (end_time-start_time)))
 
-        # # keep a reference to anim
-        # animate_vf_xy(
-        #     controller=self,
-        #     real_path=real_path,
-        #     pred_path=pred_path,
-        #     save_path="vf_xy_anim.gif",
-        #     obstacles=OBSTACLES,
-        # )
-
-        animate_heat_map_global(
-            controller=self,
-            real_path=real_path,
-            pred_path=pred_path,
-            real_cost=real_cost,
-            interp_cost=interp_cost,
-            save_name="vf_debug",
-            obstacles=OBSTACLES,
-            interval_ms=100,
-        )
-
+        
+        self.registry['results'] = {
+            'real_path': real_path,
+            'pred_path': pred_path,
+            'input_hist': input_hist,
+            'real_cost': real_cost,
+            'interp_cost': interp_cost,
+            'latest_vf': self.latest_vf,
+            'latest_info': self.latest_info,
+            'vf_interp': VFInterp(
+                self.latest_vf,
+                self.vf_time_grid,
+                self.HJ_GRID_MIN,
+                self.HJ_GRID_DX,
+                self.HJ_GRID_STP,
+            )
+        }
+        
 
     def close(self):
         pass
 
+class VFInterp:
+    """Pickle-able wrapper around _query_vf for animation compatibility."""
+    def __init__(self, vf, time_grid, hj_grid_min, hj_grid_dx, hj_grid_stp):
+        self.vf = vf
+        self.time_grid = time_grid
+        self.hj_grid_min = hj_grid_min
+        self.hj_grid_dx = hj_grid_dx
+        self.hj_grid_stp = hj_grid_stp
 
-#######################
+    def __call__(self, pts):
+        # pts: shape (M, 5) = [t, x, y, yaw, vel]
+        t_pts = pts[:, 0]
+        x_pts = pts[:, 1:]
+        vf, tg = self.vf, self.time_grid
+        NX = x_pts.shape[1]
 
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, PillowWriter
-
-
-OBSTACLES = [
-    (0.0, 0.0, 2.0, 2.0),
-    (1.2, 2.8, 2.8, 0.4),
-]
-
-
-def _wrap_yaw(yaw):
-    return (yaw + np.pi) % (2 * np.pi) - np.pi
-
-
-def _draw_obstacles(ax, obstacles=None):
-    if obstacles is None:
-        obstacles = []
-    for ox, oy, ow, oh in obstacles:
-        ax.add_patch(
-            plt.Rectangle(
-                (ox, oy), ow, oh,
-                edgecolor="black",
-                facecolor="gray",
-                alpha=0.4,
-            )
+        it = np.clip(
+            np.round((t_pts - tg[0]) / (tg[1] - tg[0])).astype(int),
+            0, vf.shape[0] - 1,
         )
-
-
-def _hj_axes():
-    x_grid = np.linspace(HJ_GRID_MIN[0], HJ_GRID_MAX[0], HJ_GRID_STP[0])
-    y_grid = np.linspace(HJ_GRID_MIN[1], HJ_GRID_MAX[1], HJ_GRID_STP[1])
-    yaw_grid = np.linspace(HJ_GRID_MIN[2], HJ_GRID_MAX[2], HJ_GRID_STP[2])
-    vel_grid = np.linspace(HJ_GRID_MIN[3], HJ_GRID_MAX[3], HJ_GRID_STP[3])
-    return x_grid, y_grid, yaw_grid, vel_grid
-
-
-def _nearest_index(grid, value):
-    return int(np.argmin(np.abs(grid - value)))
-
-
-def plot_vf_xy_slice(controller, time, state, save_path=None, obstacles=None):
-    """
-    Plot XY slice of V at fixed (time, yaw, vel).
-    state = [x, y, yaw, vel]
-    """
-    x, y, yaw, vel = map(float, state)
-    yaw = _wrap_yaw(yaw)
-
-    x_grid, y_grid, _, _ = _hj_axes()
-    xg, yg = np.meshgrid(x_grid, y_grid, indexing="ij")
-
-    pts = np.column_stack([
-        np.full(xg.size, time),
-        xg.ravel(),
-        yg.ravel(),
-        np.full(xg.size, yaw),
-        np.full(xg.size, vel),
-    ])
-    Z = controller.vf_interp(pts).reshape(len(x_grid), len(y_grid))
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-    levels = 30 if np.max(Z) > np.min(Z) else 1
-    cf = ax.contourf(x_grid, y_grid, Z.T, levels=levels)
-    ax.contour(x_grid, y_grid, Z.T, levels=10, colors="black", linewidths=0.4)
-
-    if np.min(Z) < 0 < np.max(Z):
-        ax.contour(x_grid, y_grid, Z.T, levels=[0.0], colors="red", linewidths=2.0)
-
-    _draw_obstacles(ax, obstacles)
-    ax.plot(x, y, "ro", label="current state")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_title(f"VF XY slice at t={time:.2f}, yaw={yaw:.2f}, vel={vel:.2f}")
-    ax.axis("equal")
-    ax.grid(True)
-    ax.legend()
-    fig.colorbar(cf, ax=ax, label="V")
-
-    if save_path is not None:
-        fig.savefig(save_path, dpi=200, bbox_inches="tight")
-
-    return fig, ax
-
-
-def plot_vf_yaw_vel_slice(controller, time, state, save_path=None):
-    """
-    Plot yaw-vel slice of V at fixed (time, x, y).
-    state = [x, y, yaw, vel]
-    """
-    x, y, yaw, vel = map(float, state)
-
-    _, _, yaw_grid, vel_grid = _hj_axes()
-    yg, vg = np.meshgrid(yaw_grid, vel_grid, indexing="ij")
-
-    pts = np.column_stack([
-        np.full(yg.size, time),
-        np.full(yg.size, x),
-        np.full(yg.size, y),
-        yg.ravel(),
-        vg.ravel(),
-    ])
-    Z = controller.vf_interp(pts).reshape(len(yaw_grid), len(vel_grid))
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-    levels = 30 if np.max(Z) > np.min(Z) else 1
-    cf = ax.contourf(yaw_grid, vel_grid, Z.T, levels=levels)
-    ax.contour(yaw_grid, vel_grid, Z.T, levels=10, colors="black", linewidths=0.4)
-
-    if np.min(Z) < 0 < np.max(Z):
-        ax.contour(yaw_grid, vel_grid, Z.T, levels=[0.0], colors="red", linewidths=2.0)
-
-    ax.plot(_wrap_yaw(yaw), vel, "ro", label="current state")
-    ax.set_xlabel("yaw")
-    ax.set_ylabel("velocity")
-    ax.set_title(f"VF yaw-vel slice at t={time:.2f}, x={x:.2f}, y={y:.2f}")
-    ax.grid(True)
-    ax.legend()
-    fig.colorbar(cf, ax=ax, label="V")
-
-    if save_path is not None:
-        fig.savefig(save_path, dpi=200, bbox_inches="tight")
-
-    return fig, ax
-
-
-def animate_vf_xy(controller, real_path, pred_path, save_path=None, obstacles=None, interval_ms=100):
-    """
-    3-panel debug animation:
-      1) real VF slice in (x, y)
-      2) interpolated VF slice in (x, y)
-      3) real VF slice in (yaw, vel)
-
-    real_path: list of [t, x, y, yaw, vel]
-    pred_path: list of predicted trajectories, each shape (N+1, NX)
-    """
-    real_path = np.asarray(real_path, dtype=float)
-    pred_path = [np.asarray(p, dtype=float) for p in pred_path]
-
-    x_grid, y_grid, yaw_grid, vel_grid = _hj_axes()
-    xg, yg = np.meshgrid(x_grid, y_grid, indexing="ij")
-    yawg, velg = np.meshgrid(yaw_grid, vel_grid, indexing="ij")
-
-    # time axis for real VF tensor
-    vf = controller.latest_vf
-    vf_time_grid = np.arange(vf.shape[0]) * 0.2   # or use your actual VF time step
-
-    fig = plt.figure(figsize=(14, 10))
-    ax_xy_real   = fig.add_subplot(2, 2, 1)
-    ax_xy_interp = fig.add_subplot(2, 2, 2)
-    ax_yv_real   = fig.add_subplot(2, 1, 2)
-
-    x_min, x_max = HJ_GRID_MIN[0], HJ_GRID_MAX[0]
-    y_min, y_max = HJ_GRID_MIN[1], HJ_GRID_MAX[1]
-    yaw_min, yaw_max = HJ_GRID_MIN[2], HJ_GRID_MAX[2]
-    vel_min, vel_max = HJ_GRID_MIN[3], HJ_GRID_MAX[3]
-
-    def _draw_heading_arrow(ax, x, y, yaw, length=0.25, color="white", lw=2.5):
-        dx = length * np.cos(yaw)
-        dy = length * np.sin(yaw)
-        ax.arrow(
-            x, y, dx, dy,
-            head_width=0.08,
-            head_length=0.10,
-            fc=color,
-            ec=color,
-            linewidth=lw,
-            length_includes_head=True,
-            zorder=8,
-        )
-
-    def update(i):
-        for ax in (ax_xy_real, ax_xy_interp, ax_yv_real):
-            ax.clear()
-
-        # current state
-        t, x, y, yaw, vel = real_path[i]
-        yaw = _wrap_yaw(yaw)
-
-        # nearest indices into real VF tensor
-        it = _nearest_index(vf_time_grid, t)
-        iyaw = _nearest_index(yaw_grid, yaw)
-        ivel = _nearest_index(vel_grid, vel)
-        ix = _nearest_index(x_grid, x)
-        iy = _nearest_index(y_grid, y)
-
-        # ------------------------------------------------------------
-        # 1) REAL VF: XY slice at fixed (t, yaw, vel)
-        # ------------------------------------------------------------
-        Z_xy_real = vf[it, :, :, iyaw, ivel]
-
-        ax_xy_real.contourf(x_grid, y_grid, Z_xy_real.T, levels=30, alpha=0.9)
-        ax_xy_real.contour(x_grid, y_grid, Z_xy_real.T, levels=10,
-                           colors="black", linewidths=0.4)
-
-        if np.min(Z_xy_real) < 0 < np.max(Z_xy_real):
-            ax_xy_real.contour(x_grid, y_grid, Z_xy_real.T, levels=[0.0],
-                               colors="red", linewidths=2.5)
-
-        _draw_obstacles(ax_xy_real, obstacles)
-        ax_xy_real.plot(real_path[:i+1, 1], real_path[:i+1, 2],
-                        color="white", linewidth=2.5, zorder=6, label="real path")
-        ax_xy_real.plot(x, y, "ro", markersize=8, zorder=7, label="current")
-        _draw_heading_arrow(ax_xy_real, x, y, yaw, color="white")
-
-        if i < len(pred_path):
-            pred = pred_path[i]
-            ax_xy_real.plot(pred[:, 0], pred[:, 1],
-                            color="orange", linestyle="--", linewidth=2.0,
-                            zorder=6, label="prediction")
-
-        ax_xy_real.set_xlim(x_min, x_max)
-        ax_xy_real.set_ylim(y_min, y_max)
-        ax_xy_real.set_aspect("equal", adjustable="box")
-        ax_xy_real.set_title("Real VF slice: (x, y)")
-        ax_xy_real.set_xlabel("x")
-        ax_xy_real.set_ylabel("y")
-        ax_xy_real.grid(True)
-        ax_xy_real.legend(loc="upper right")
-
-        # ------------------------------------------------------------
-        # 2) INTERP VF: XY slice at fixed (t, yaw, vel)
-        # ------------------------------------------------------------
-        pts_xy = np.column_stack([
-            np.full(xg.size, t),
-            xg.ravel(),
-            yg.ravel(),
-            np.full(xg.size, yaw),
-            np.full(xg.size, vel),
-        ])
-        pts_xy[:, 1] = np.clip(pts_xy[:, 1], x_min, x_max)
-        pts_xy[:, 2] = np.clip(pts_xy[:, 2], y_min, y_max)
-        pts_xy[:, 3] = _wrap_yaw(pts_xy[:, 3])
-        pts_xy[:, 4] = np.clip(pts_xy[:, 4], vel_min, vel_max)
-
-        Z_xy_interp = controller.vf_interp(pts_xy).reshape(len(x_grid), len(y_grid))
-
-        ax_xy_interp.contourf(x_grid, y_grid, Z_xy_interp.T, levels=30, alpha=0.9)
-        ax_xy_interp.contour(x_grid, y_grid, Z_xy_interp.T, levels=10,
-                             colors="black", linewidths=0.4)
-
-        if np.min(Z_xy_interp) < 0 < np.max(Z_xy_interp):
-            ax_xy_interp.contour(x_grid, y_grid, Z_xy_interp.T, levels=[0.0],
-                                 colors="red", linewidths=2.5)
-
-        _draw_obstacles(ax_xy_interp, obstacles)
-        ax_xy_interp.plot(real_path[:i+1, 1], real_path[:i+1, 2],
-                          color="white", linewidth=2.5, zorder=6, label="real path")
-        ax_xy_interp.plot(x, y, "ro", markersize=8, zorder=7, label="current")
-        _draw_heading_arrow(ax_xy_interp, x, y, yaw, color="white")
-
-        if i < len(pred_path):
-            pred = pred_path[i]
-            ax_xy_interp.plot(pred[:, 0], pred[:, 1],
-                              color="orange", linestyle="--", linewidth=2.0,
-                              zorder=6, label="prediction")
-
-        ax_xy_interp.set_xlim(x_min, x_max)
-        ax_xy_interp.set_ylim(y_min, y_max)
-        ax_xy_interp.set_aspect("equal", adjustable="box")
-        ax_xy_interp.set_title("Interpolated VF slice: (x, y)")
-        ax_xy_interp.set_xlabel("x")
-        ax_xy_interp.set_ylabel("y")
-        ax_xy_interp.grid(True)
-        ax_xy_interp.legend(loc="upper right")
-
-        # ------------------------------------------------------------
-        # 3) REAL VF: (yaw, vel) slice at fixed (t, x, y)
-        # ------------------------------------------------------------
-        Z_yv_real = vf[it, ix, iy, :, :]
-
-        ax_yv_real.contourf(yaw_grid, vel_grid, Z_yv_real.T, levels=30, alpha=0.9)
-        ax_yv_real.contour(yaw_grid, vel_grid, Z_yv_real.T, levels=10,
-                           colors="black", linewidths=0.4)
-
-        if np.min(Z_yv_real) < 0 < np.max(Z_yv_real):
-            ax_yv_real.contour(yaw_grid, vel_grid, Z_yv_real.T, levels=[0.0],
-                               colors="red", linewidths=2.5)
-
-        ax_yv_real.plot(yaw, vel, "ro", markersize=8, label="current")
-        if i < len(pred_path):
-            pred = pred_path[i]
-            ax_yv_real.plot(pred[:, 2], pred[:, 3],
-                            color="orange", linestyle="--", linewidth=2.0,
-                            label="prediction")
-
-        ax_yv_real.set_xlim(yaw_min, yaw_max)
-        ax_yv_real.set_ylim(vel_min, vel_max)
-        ax_yv_real.set_title("Real VF slice: (yaw, vel)")
-        ax_yv_real.set_xlabel("yaw")
-        ax_yv_real.set_ylabel("velocity")
-        ax_yv_real.grid(True)
-        ax_yv_real.legend(loc="upper right")
-
-        fig.suptitle(f"t = {t:.2f}", fontsize=14)
-        return []
-
-    anim = FuncAnimation(
-        fig,
-        update,
-        frames=len(real_path),
-        interval=interval_ms,
-        blit=False,
-        repeat=False,
-    )
-
-    if save_path is not None:
-        anim.save(save_path, writer=PillowWriter(fps=max(1, int(1000 / interval_ms))))
-
-    return fig, (ax_xy_real, ax_xy_interp, ax_yv_real), anim
-
-
-def animate_heat_map_global(
-    controller,
-    real_path,
-    pred_path,
-    real_cost=None,
-    interp_cost=None,
-    save_name=None,
-    obstacles=None,
-    interval_ms=100,
-):
-    """
-    Animate:
-      1) real VF slice in (x, y)
-      2) interpolated VF slice in (x, y)
-      3) real VF slice in (yaw, vel)
-      4) time vs HJ cost
-
-    Parameters
-    ----------
-    controller : Controller
-        Must already have:
-          - controller.latest_vf
-          - controller.vf_interp
-          - controller.latest_info["interval"]
-    real_path : list
-        List of [t, x, y, yaw, vel]
-    pred_path : list
-        List of predicted trajectories, each of shape (N+1, NX)
-    costs_list : list or None
-        History of scalar HJ values, one per MPC step
-    save_name : str or None
-        If given, save GIF with this name in current directory
-    obstacles : list or None
-        List of rectangles (ox, oy, ow, oh)
-    interval_ms : int
-        Animation frame interval in ms
-    """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation, PillowWriter
-
-    real_path = np.asarray(real_path, dtype=float)
-    pred_path = [np.asarray(p, dtype=float) for p in pred_path]
-
-    if obstacles is None:
-        obstacles = []
-
-    if len(pred_path) == 0:
-        raise ValueError("pred_path is empty")
-
-    # real_path is often one longer than pred_path
-    n_frames = min(len(pred_path), len(real_path))
-
-    x_grid, y_grid, yaw_grid, vel_grid = _hj_axes()
-    xg, yg = np.meshgrid(x_grid, y_grid, indexing="ij")
-
-    vf = controller.latest_vf
-    t0_vf = controller.latest_info["interval"][0]
-    dt_vf = HJ_TIMESTEP
-    vf_time_grid = t0_vf + np.arange(vf.shape[0]) * dt_vf
-
-    x_min, x_max = HJ_GRID_MIN[0], HJ_GRID_MAX[0]
-    y_min, y_max = HJ_GRID_MIN[1], HJ_GRID_MAX[1]
-    yaw_min, yaw_max = HJ_GRID_MIN[2], HJ_GRID_MAX[2]
-    vel_min, vel_max = HJ_GRID_MIN[3], HJ_GRID_MAX[3]
-
-    fig = plt.figure(figsize=(18, 10))
-    ax1 = fig.add_subplot(2, 3, 1)   # real XY
-    ax2 = fig.add_subplot(2, 3, 2)   # interp XY
-    ax3 = fig.add_subplot(2, 3, 3)   # real yaw-vel
-    ax4 = fig.add_subplot(2, 1, 2)   # cost
-
-    def _draw_obstacles_local(ax):
-        for ox, oy, ow, oh in obstacles:
-            ax.add_patch(
-                plt.Rectangle(
-                    (ox, oy), ow, oh,
-                    linewidth=1.5,
-                    edgecolor="white",
-                    facecolor="gray",
-                    alpha=0.6,
-                    zorder=5,
+        idxs = []
+        for i in range(NX):
+            if i == 2:
+                wrapped = (x_pts[:, i] - self.hj_grid_min[i]) % (
+                    self.hj_grid_min[i + 1] - self.hj_grid_min[i]
+                    if False else (self.hj_grid_dx[i] * (self.hj_grid_stp[i] - 1))
                 )
-            )
-
-    def _draw_heading_arrow(ax, x, y, yaw, length=0.25, color="white", lw=2.0):
-        dx = length * np.cos(yaw)
-        dy = length * np.sin(yaw)
-        ax.arrow(
-            x, y, dx, dy,
-            head_width=0.08,
-            head_length=0.10,
-            fc=color,
-            ec=color,
-            linewidth=lw,
-            length_includes_head=True,
-            zorder=8,
-        )
-
-    def _plot_xy_panel(ax, Z, title, t, x, y, yaw, pred):
-        zmin, zmax = np.min(Z), np.max(Z)
-        if zmax - zmin > 1e-10:
-            ax.contourf(
-                x_grid, y_grid, Z.T,
-                levels=np.linspace(zmin, zmax, 50),
-                cmap="viridis",
-            )
-            ax.contour(
-                x_grid, y_grid, Z.T,
-                levels=np.linspace(zmin, zmax, 10),
-                colors="black",
-                linewidths=0.5,
-            )
-        else:
-            ax.contourf(x_grid, y_grid, Z.T, levels=1, cmap="viridis")
-
-        if zmin < 0 < zmax:
-            ax.contour(x_grid, y_grid, Z.T, levels=[0.0], colors="red", linewidths=2.0)
-
-        _draw_obstacles_local(ax)
-
-        # real path so far
-        ax.plot(
-            real_path[:frame_idx + 1, 1],
-            real_path[:frame_idx + 1, 2],
-            color="white",
-            linewidth=2.0,
-            zorder=6,
-            label="real path",
-        )
-
-        # current state
-        ax.plot(x, y, "ro", markersize=7, zorder=7, label="current")
-        _draw_heading_arrow(ax, x, y, yaw, color="white")
-
-        # predicted horizon
-        if pred is not None and len(pred) > 0:
-            ax.plot(
-                pred[:, 0], pred[:, 1],
-                color="orange",
-                linestyle="--",
-                linewidth=2.0,
-                zorder=6,
-                label="prediction",
-            )
-            ax.plot(pred[0, 0], pred[0, 1], "yo", markersize=6, zorder=7)
-
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max)
-        ax.set_xlabel("X-axis")
-        ax.set_ylabel("Y-axis")
-        ax.set_title(title)
-        ax.set_aspect("equal", adjustable="box")
-        ax.grid(True)
-        ax.legend(loc="upper right", fontsize=8)
-
-    def _plot_yv_panel(ax, Z, t, x, y, yaw, vel, pred):
-        zmin, zmax = np.min(Z), np.max(Z)
-        if zmax - zmin > 1e-10:
-            ax.contourf(
-                yaw_grid, vel_grid, Z.T,
-                levels=np.linspace(zmin, zmax, 50),
-                cmap="viridis",
-            )
-            ax.contour(
-                yaw_grid, vel_grid, Z.T,
-                levels=np.linspace(zmin, zmax, 10),
-                colors="black",
-                linewidths=0.5,
-            )
-        else:
-            ax.contourf(yaw_grid, vel_grid, Z.T, levels=1, cmap="viridis")
-
-        if zmin < 0 < zmax:
-            ax.contour(yaw_grid, vel_grid, Z.T, levels=[0.0], colors="red", linewidths=2.0)
-
-        ax.plot(yaw, vel, "ro", markersize=7, label="current")
-
-        if pred is not None and len(pred) > 0:
-            pred_yaw = _wrap_yaw(pred[:, 2])
-            pred_vel = pred[:, 3]
-            ax.plot(
-                pred_yaw, pred_vel,
-                color="orange",
-                linestyle="--",
-                linewidth=2.0,
-                label="prediction",
-            )
-            ax.plot(pred_yaw[0], pred_vel[0], "yo", markersize=6)
-
-        ax.set_xlim(yaw_min, yaw_max)
-        ax.set_ylim(vel_min, vel_max)
-        ax.set_xlabel("Theta")
-        ax.set_ylabel("Velocity")
-        ax.set_title("Value Function (Theta vs V)")
-        ax.grid(True)
-        ax.legend(loc="upper right", fontsize=8)
-
-    if save_name is not None:
-        # Remove existing directory if it exists, to ensure a clean save
-        if os.path.exists(save_name):
-            shutil.rmtree(save_name)
-        os.mkdir(save_name)
-
-    pbar = tqdm(total=n_frames, desc="Animating frames")
-
-    def update(frame_idx_local):
-        nonlocal frame_idx
-        frame_idx = frame_idx_local
-
-        for ax in (ax1, ax2, ax3, ax4):
-            ax.clear()
-
-        t, x, y, yaw, vel = real_path[frame_idx]
-        yaw = _wrap_yaw(yaw)
-        pred = pred_path[frame_idx] if frame_idx < len(pred_path) else None
-
-        # nearest indices for raw VF slices
-        it = _nearest_index(vf_time_grid, t)
-        ix = _nearest_index(x_grid, x)
-        iy = _nearest_index(y_grid, y)
-        iyaw = _nearest_index(yaw_grid, yaw)
-        ivel = _nearest_index(vel_grid, vel)
-
-        # ------------------------------------------------------------
-        # 1) REAL VF: XY slice at fixed (t, yaw, vel)
-        # ------------------------------------------------------------
-        Z_xy_real = vf[it, :, :, iyaw, ivel]
-        _plot_xy_panel(ax1, Z_xy_real, "Raw Value Function (X vs Y)", t, x, y, yaw, pred)
-
-        # ------------------------------------------------------------
-        # 2) INTERP VF: XY slice at fixed (t, yaw, vel)
-        # ------------------------------------------------------------
-        pts_xy = np.column_stack([
-            np.full(xg.size, t),
-            xg.ravel(),
-            yg.ravel(),
-            np.full(xg.size, yaw),
-            np.full(xg.size, vel),
-        ])
-        pts_xy[:, 3] = _wrap_yaw(pts_xy[:, 3])
-        Z_xy_interp = controller.vf_interp(pts_xy).reshape(len(x_grid), len(y_grid))
-        _plot_xy_panel(ax2, Z_xy_interp, "Interpolated Value Function (X vs Y)", t, x, y, yaw, pred)
-
-        # ------------------------------------------------------------
-        # 3) REAL VF: (yaw, vel) slice at fixed (t, x, y)
-        # ------------------------------------------------------------
-        Z_yv_real = vf[it, ix, iy, :, :]
-        _plot_yv_panel(ax3, Z_yv_real, t, x, y, yaw, vel, pred)
-
-        # ------------------------------------------------------------
-        # 4) Time vs Cost
-        # ------------------------------------------------------------
-        cost_arr = np.asarray([real_cost, interp_cost], dtype=float).T
-        if len(cost_arr) > 0:
-            time_axis = np.arange(len(cost_arr)) * TIMESTEP
-
-            ax4.plot(
-                time_axis,
-                cost_arr[:, 0],
-                color="steelblue",
-                linewidth=1.5,
-                label="Real Cost",
-            )
-            ax4.plot(
-                time_axis,
-                cost_arr[:, 1],
-                color="coral",
-                linewidth=1.5,
-                label="Interpolated Cost",
-            )
-            ax4.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
-
-            if frame_idx < len(cost_arr):
-                ax4.axvline(
-                    time_axis[frame_idx],
-                    color="red",
-                    linestyle="--",
-                    linewidth=1.5,
-                    label=f"t = {time_axis[frame_idx]:.2f} s",
+                ix = np.clip(np.round(wrapped / self.hj_grid_dx[i]).astype(int), 0, self.hj_grid_stp[i] - 1)
+            else:
+                ix = np.clip(
+                    np.round((x_pts[:, i] - self.hj_grid_min[i]) / self.hj_grid_dx[i]).astype(int),
+                    0, self.hj_grid_stp[i] - 1,
                 )
-                ax4.plot(time_axis[frame_idx], cost_arr[frame_idx, 0], "ro", markersize=7)
-                ax4.plot(time_axis[frame_idx], cost_arr[frame_idx, 1], "ro", markersize=7)
+            idxs.append(ix)
+        return vf[it, idxs[0], idxs[1], idxs[2], idxs[3]]
 
-            ax4.set_xlabel("Time (s)")
-            ax4.set_ylabel("HJ Value V(x)")
-            ax4.set_title("Time vs HJ Cost  (V ≤ 0 = safe)")
-            ax4.legend(loc="upper right", fontsize=8)
-            ax4.grid(True, alpha=0.4)
-
-        fig.suptitle(f"t = {t:.2f}", fontsize=14)
-        fig.tight_layout()
-
-        if save_name is not None:
-            frame_file = os.path.join(save_name, f"frame_{frame_idx:04d}.png")
-            fig.savefig(frame_file, dpi=80)
-
-        pbar.update(1)
-        return []
-
-    frame_idx = 0
-    anim = FuncAnimation(
-        fig,
-        update,
-        frames=n_frames,
-        interval=interval_ms,
-        blit=False,
-        repeat=False,
-    )
-
-    if save_name is not None:
-        anim.save(f"{save_name}.gif", writer=PillowWriter(fps=max(1, int(1000 / interval_ms))))
-
-    pbar.close()
-    return fig, (ax1, ax2, ax3, ax4), anim
-
-###################
 
 if __name__ == "__main__":
     

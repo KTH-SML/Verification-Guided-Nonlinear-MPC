@@ -2,8 +2,12 @@ from multiprocessing import get_context
 from multiprocessing.managers import SyncManager
 from multiprocessing.shared_memory import SharedMemory
 
+import config
 from verifier import Verifier
 from controller import Controller
+# from controller_rgi import Controller
+from animation import Animation
+
 
 class Runtime:
     def __init__(self):
@@ -18,6 +22,7 @@ class Runtime:
 
         self.p_verifier = None
         self.p_controller = None
+        self.p_animation = None
 
     # ------------------------------------------------------------------
     # Process entrypoints
@@ -39,11 +44,19 @@ class Runtime:
         finally:
             controller.close()
 
+    @staticmethod
+    def _animation_main(registry, state_queue, stop_event, run_args):
+        animation = Animation(registry, state_queue, stop_event)
+        try:
+            animation.run(*run_args)
+        finally:
+            animation.close()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self, verifier_args=(), controller_args=()):
+    def start(self, verifier_args=(), controller_args=(), animation_args=()):
         self.p_verifier = self.ctx.Process(
             target=self._verifier_main,
             args=(self.registry, self.state_queue, self.stop_event, verifier_args),
@@ -54,13 +67,21 @@ class Runtime:
             args=(self.registry, self.state_queue, self.stop_event, controller_args),
             name="ControllerProcess",
         )
+        self.p_animation = self.ctx.Process(
+            target=self._animation_main,
+            args=(self.registry, self.state_queue, self.stop_event, animation_args),
+            name="AnimationProcess",
+        )
 
         self.p_verifier.start()
         self.p_controller.start()
+        self.p_animation.start()
 
     def wait(self):
         if self.p_controller is not None:
             self.p_controller.join()
+        if self.p_animation is not None:   
+            self.p_animation.join()
 
     def stop(self):
         self.stop_event.set()
@@ -75,6 +96,10 @@ class Runtime:
         if self.p_controller is not None and self.p_controller.is_alive():
             self.p_controller.terminate()
             self.p_controller.join()
+
+        if self.p_animation is not None and self.p_animation.is_alive():
+            self.p_animation.terminate()
+            self.p_animation.join()
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -104,6 +129,9 @@ class Runtime:
 
         from math import pi
 
+        # Write shared configuration into registry before any subprocess starts
+        config.run(self.registry)
+
         t0 = 0.0
         x0 = [3.0, 0.5, pi/2, 0.0]
 
@@ -111,11 +139,13 @@ class Runtime:
             self.start(
                 verifier_args=(),
                 controller_args=(t0, x0),
+                animation_args=(),
             )
             self.wait()
         finally:
             self.stop()
             self.close()
+
 
 if __name__ == "__main__":
     Runtime().run()
