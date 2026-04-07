@@ -77,7 +77,7 @@ class Verifier:
     def run(self):
 
         data_set_no = 1
-        path = "/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/out_bicycle4d_with_obs.npy"
+        path = "/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/kaj/sets/data_1.npy"
         if self.load_from_file:
             print(f"Loading set from {path}...")
         else:
@@ -112,7 +112,7 @@ class Verifier:
             raw = np.load(path, mmap_mode='r').copy()
             info = {'interval': (0.0, 20.0), 'name': 'foo'}
 
-            vf = np.concatenate([raw, raw, raw], axis=3)
+            vf = np.concatenate([raw[:,:,:,:-1], raw, raw[:,:,:,1:]], axis=3)
 
             compute_end = tm.time()
 
@@ -133,7 +133,7 @@ class Verifier:
             break
 
         # Slow loop
-        while not self.load_from_file and self.registry.get('time', 0) <= self.HORIZON - self.TIMESTEP:
+        while not self.load_from_file and self.registry.get('time', 0) <= self.HORIZON - 1.0:
 
             compute_start = tm.time()
 
@@ -157,7 +157,7 @@ class Verifier:
             out1 = TLT.construct(task).realize(self.impl)
 
             raw = np.asarray(out1)
-            vf = np.concatenate([raw[:,:,:,:-1], raw, raw[:,:,:,1:]], axis=3)
+            vf = np.concatenate([raw, raw[:,:,:,1:], raw[:,:,:,1:]], axis=3)
 
             self.registry['foo.vf'] = vf
             self.registry['latest.info'] = info

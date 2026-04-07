@@ -98,8 +98,10 @@ class Runtime:
             self.p_controller.join()
 
         if self.p_animation is not None and self.p_animation.is_alive():
-            self.p_animation.terminate()
-            self.p_animation.join()
+            self.p_animation.join(timeout=120.0)
+            if self.p_animation.is_alive():
+                self.p_animation.terminate()
+                self.p_animation.join()
 
     # ------------------------------------------------------------------
     # Cleanup

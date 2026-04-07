@@ -9,7 +9,7 @@ WHEELBASE = 0.32   # m
 
 # Verifier (HJ reachability) limits
 MAX_VEL_VERIFIER   = 0.8    # m/s
-MAX_ACCEL_VERIFIER = 0.6    # m/s^2
+MAX_ACCEL_VERIFIER = 0.5    # m/s^2
 MAX_STEER_VERIFIER = 0.6    # rad
 
 # MPC (controller) limits
@@ -29,8 +29,8 @@ HJ_HORIZON  = 20.0   # s
 # ------------------------------------------------------------------
 
 MPC_TIMESTEP = 0.1  # s
-MPC_N        = 10     # horizon steps  →  total horizon = N * TIMESTEP = 0.6 s
-Qhj          = 10.0        # cost weight for HJ value function guidance
+MPC_N        = 5    # horizon steps  →  total horizon = N * TIMESTEP = 0.6 s
+Qhj          = 1.0        # cost weight for HJ value function guidance
 
 # ------------------------------------------------------------------
 # Map
@@ -48,6 +48,8 @@ XW, YW = 4.0, 4.0
 OBSTACLES = [
     (0.0, 0.0, 2.0, 2.0),   # box_area:  x=[0.01,2.0], y=[0.01,2.0]
     (1.2, 2.8, 2.8, 0.4),   # thin_wall: x=[1.2, ...], y=[2.8, 3.2]
+    (3.5, 0.0, 0.4, 3.0),
+    (0.0, 3.8, 4.0, 0.2),
 ]
 
 # Goal region: (x_min, y_min, width, height)

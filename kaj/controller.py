@@ -28,9 +28,16 @@ def get_input(name, seq=None):
     return INPUT[name] if seq is None else seq[INPUT[name]]
 
 
+# Diagonal quadratic HJ surrogate:
+#   hat(V)_k(x) = a_k + g_k^T (x - xbar_k) + 0.5 * hdiag_k ⊙ (x - xbar_k)^2
+#
+# Parameter layout per stage:
+#   [xbar(4), a(1), g(4), hdiag(4)]  =>  NP = 13
 PARAM = {name: s for name, s in accum([
-    ("xbar", NX),           # Linearization point
-    ("a", 1), ("b", NX),    # Interpolated value function coefficients
+    ("xbar",  NX),   # Linearization point
+    ("a",     1),    # V(xbar)
+    ("g",     NX),   # grad V(xbar)       — linear term
+    ("hdiag", NX),   # diag Hessian V(xbar) — quadratic term (clamped >= 0)
 ])}
 NP = max(s.stop for s in PARAM.values())
 
@@ -97,12 +104,11 @@ class Controller:
         ocp.solver_options.nlp_solver_type     = "SQP_RTI"   # Real-Time Iteration
         ocp.solver_options.qp_solver           = "PARTIAL_CONDENSING_HPIPM"
         ocp.solver_options.qp_solver_cond_N    = self.N
-        # GAUSS_NEWTON: constructs the Hessian from first-order cost information
-        # only, guaranteeing positive-semidefiniteness and eliminating HPIPM
-        # ACADOS_MINSTEP failures caused by the indefinite second-order HJ terms
-        # (Method B). Slightly slower convergence per SQP iteration than EXACT,
-        # but far more robust for SQP_RTI in embedded / real-time use.
-        # ocp.solver_options.hessian_approx      = "EXACT"
+        # GAUSS_NEWTON: required for diagonal quadratic surrogate — the hdiag
+        # second-order term makes the cost Hessian indefinite when hdiag < 0,
+        # but we clamp hdiag >= 0 in _build_stage_params so GN is both safe
+        # and faster than EXACT for SQP_RTI.
+        ocp.solver_options.hessian_approx      = "GAUSS_NEWTON"
         ocp.solver_options.print_level         = 0
         ocp.solver_options.nlp_solver_max_iter = 1000
 
@@ -136,21 +142,21 @@ class Controller:
         f_v     = _state("vel") + dt * _input("accel")
         model.disc_dyn_expr = ca.vertcat(f_x, f_y, f_th, f_v)
 
-        # Interpolated value function
-        # hat(V)_k(x) = a_k + b_k^T (x_k - bar(x)_k)
-        vf_interp = _param("a") + ca.dot(_param("b"), model.x - _param("xbar"))
+        # Diagonal quadratic HJ surrogate:
+        #   hat(V)(x) = a + g^T dz + 0.5 * hdiag ⊙ dz^2
+        # where dz = x - xbar
+        dz = model.x - _param("xbar")
+        vf_interp = (
+            _param("a")
+            + ca.dot(_param("g"), dz)
+            + 0.5 * ca.dot(_param("hdiag"), dz * dz)
+        )
 
         # Stage Cost
-        R = ca.DM(np.diag([1e-2, 1e-2]))
-        model.cost_expr_ext_cost = (
-            # ca.mtimes([model.u.T, R, model.u]) +
-            self.Qhj * vf_interp
-        )
+        model.cost_expr_ext_cost = self.Qhj * vf_interp
 
         # Terminal Cost
-        model.cost_expr_ext_cost_e = (
-            self.Qhj * vf_interp
-        )
+        model.cost_expr_ext_cost_e = self.Qhj * vf_interp
 
         return model
 
@@ -234,7 +240,7 @@ class Controller:
 
         # Wrap yaw to [-π, π] before interpolation
         x_pts = x_pts.copy()
-        x_pts[:, 2] = (x_pts[:, 2] + np.pi) % (2 * np.pi) - np.pi
+        # x_pts[:, 2] = (x_pts[:, 2] + np.pi) % (2 * np.pi) - np.pi
 
         all_pts = np.column_stack([t_pts, x_pts])  # (M, 5)
 
@@ -246,11 +252,11 @@ class Controller:
             g  = grids[d]
             dx = g[1] - g[0]
             i0 = np.floor((all_pts[:, d] - g[0]) / dx).astype(int)
-            i0 = np.clip(i0, 0, shape[d] - 2)
+            i0 = np.clip(i0, 0, len(g) - 2)
             alpha = np.clip((all_pts[:, d] - g[i0]) / dx, 0.0, 1.0)
 
             if d == 3:  # yaw: periodic — right neighbor wraps to index 0 at boundary
-                i1 = np.where(i0 == shape[d] - 2,
+                i1 = np.where(i0 == len(g) - 2,
                             np.zeros(M, dtype=int),   # wrap: last cell right → index 0
                             i0 + 1)
             else:
@@ -303,8 +309,8 @@ class Controller:
         self.solver.set(0, "lbx", state)
         self.solver.set(0, "ubx", state)
 
-        # 2) Build stage-wise linear HJ surrogates:
-        #    p_k = [xbar_k, a_k, b_k]
+        # 2) Build stage-wise diagonal quadratic HJ surrogates:
+        #    p_k = [xbar_k, a_k, g_k, hdiag_k]
         x_pred = self._predict_states(state)
         stage_params = self._build_stage_params(time, x_pred)
 
@@ -374,19 +380,20 @@ class Controller:
 
     def _build_stage_params(self, time, x_pred):
         """
-        Build per-stage linear HJ surrogate parameters.
+        Build per-stage diagonal quadratic HJ surrogate parameters.
 
         For each stage k:
-            t_k    = time + k * TIMESTEP
-            xbar_k = x_pred[k]
-            a_k    = V(t_k, xbar_k)
-            b_k    = grad_x V(t_k, xbar_k)   (central finite differences)
+            t_k     = time + k * TIMESTEP
+            xbar_k  = x_pred[k]
+            a_k     = V(t_k, xbar_k)
+            g_k     = grad_x V(t_k, xbar_k)      (central finite differences)
+            hdiag_k = diag Hessian V(t_k, xbar_k) (second differences, clamped >= 0)
 
         Returns
         -------
         params_all : ndarray, shape (N+1, NP)
             Each row is:
-                p_k = [xbar_k(4), a_k(1), b_k(4)]
+                p_k = [xbar_k(4), a_k(1), g_k(4), hdiag_k(4)]   NP = 13
         """
         S = self.N + 1
 
@@ -398,6 +405,8 @@ class Controller:
 
         # ------------------------------------------------------------
         # 1) Assemble all query points for one batched _query_vf call
+        #    Layout: [center(S), +dim0(S), -dim0(S), ..., +dim3(S), -dim3(S)]
+        #    Total: (1 + 2*NX) * S rows
         # ------------------------------------------------------------
         pts_t = []
         pts_x = []
@@ -425,8 +434,7 @@ class Controller:
         # 2) Unpack values
         # ------------------------------------------------------------
         idx = 0
-        a_all = all_vals[idx:idx + S]
-        idx += S
+        a_all = all_vals[idx:idx + S];  idx += S
 
         v_pm = []
         for i in range(NX):
@@ -436,20 +444,34 @@ class Controller:
 
         # ------------------------------------------------------------
         # 3) Gradient by central finite differences
+        #    g[k, i] = (V+ - V-) / (2 * eps[i])
         # ------------------------------------------------------------
-        b_all = np.column_stack([
+        g_all = np.column_stack([
             (v_pm[i][0] - v_pm[i][1]) / (2.0 * eps[i])
             for i in range(NX)
         ])  # shape (S, NX)
 
         # ------------------------------------------------------------
-        # 4) Pack stage parameters
-        # PARAM = [xbar(4), a(1), b(4)]  => NP = 9
+        # 4) Diagonal Hessian by second finite differences
+        #    hdiag[k, i] = (V+ - 2*a + V-) / eps[i]^2
+        #    Clamped to >= 0 to guarantee PSD surrogate Hessian,
+        #    which keeps HPIPM stable under GAUSS_NEWTON.
+        # ------------------------------------------------------------
+        hdiag_all = np.column_stack([
+            (v_pm[i][0] - 2.0 * a_all + v_pm[i][1]) / (eps[i] ** 2)
+            for i in range(NX)
+        ])  # shape (S, NX)
+        hdiag_all = np.maximum(hdiag_all, 0.0)   # PSD clamp
+
+        # ------------------------------------------------------------
+        # 5) Pack stage parameters
+        #    PARAM = [xbar(4), a(1), g(4), hdiag(4)]  => NP = 13
         # ------------------------------------------------------------
         params_all = np.zeros((S, NP), dtype=float)
-        params_all[:, get_param("xbar")] = x_pred
-        params_all[:, get_param("a")]    = a_all[:, None]
-        params_all[:, get_param("b")]    = b_all
+        params_all[:, get_param("xbar")]  = x_pred
+        params_all[:, get_param("a")]     = a_all[:, None]
+        params_all[:, get_param("g")]     = g_all
+        params_all[:, get_param("hdiag")] = hdiag_all
 
         return params_all
 

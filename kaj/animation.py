@@ -127,7 +127,7 @@ class Animation:
         dt_vf = self.HJ_TIMESTEP
         vf_time_grid = t0_vf + np.arange(vf.shape[0]) * dt_vf
  
-        yaw_min, yaw_max = self.HJ_GRID_MIN[2], self.HJ_GRID_MAX[2]
+        yaw_min, yaw_max = self.HJ_GRID_MIN[2] - 2 * np.pi, self.HJ_GRID_MAX[2] + 2 * np.pi
         vel_min, vel_max = self.HJ_GRID_MIN[3], self.HJ_GRID_MAX[3]
         x_min, x_max = self.HJ_GRID_MIN[0], self.HJ_GRID_MAX[0]
         y_min, y_max = self.HJ_GRID_MIN[1], self.HJ_GRID_MAX[1]
