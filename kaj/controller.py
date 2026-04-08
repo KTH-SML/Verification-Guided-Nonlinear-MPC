@@ -156,7 +156,7 @@ class Controller:
         model.cost_expr_ext_cost = self.Qhj * vf_interp
 
         # Terminal Cost
-        model.cost_expr_ext_cost_e = self.Qhj * vf_interp
+        model.cost_expr_ext_cost_e = self.Qhj * vf_interp * 0.0
 
         return model
 
@@ -525,6 +525,14 @@ class Controller:
             real_path.append([t + self.TIMESTEP] + list(next_state))
 
             end_time = tm.time()
+
+            set_usage = []
+            for k, sid in enumerate(used_sets):
+                t_k = real_path[k][0]
+                if set_usage and set_usage[-1]['set_idx'] == sid:
+                    set_usage[-1]['t_end'] = t_k + self.TIMESTEP
+                else:
+                    set_usage.append({'set_idx': sid, 't_start': t_k, 't_end': t_k + self.TIMESTEP})
 
             tm.sleep(max(0.0, 0.1 - (end_time-start_time)))
 

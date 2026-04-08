@@ -8,12 +8,12 @@ from math import pi
 WHEELBASE = 0.32   # m
 
 # Verifier (HJ reachability) limits
-MAX_VEL_VERIFIER   = 0.8    # m/s
+MAX_VEL_VERIFIER   = 0.7    # m/s
 MAX_ACCEL_VERIFIER = 0.5    # m/s^2
 MAX_STEER_VERIFIER = 0.6    # rad
 
 # MPC (controller) limits
-MAX_VEL_MPC        = 0.8    # m/s
+MAX_VEL_MPC        = 1.0    # m/s
 MAX_ACCEL_MPC      = 0.8    # m/s^2
 MAX_STEER_MPC      = 0.7    # rad
 
@@ -58,7 +58,7 @@ GOAL = (3.58, 3.46, 0.30, 0.36)
 # State-space axes (spatial only, no time)
 # '*' prefix means periodic (pyspect convention);
 # consumers triple-concat yaw to extend from [-pi, pi] to [-3pi, 3pi]
-points = (25, 25, 15, 11)  # number of grid points for each axis (x,y,yaw,vel)
+points = (25, 25, 37, 17)  # number of grid points for each axis (x,y,yaw,vel)
 AXES = [
     dict(name='t',    bounds=[0.0, HJ_HORIZON], step=HJ_TIMESTEP),
     dict(name='x',    bounds=[X0, XW],          points=points[0]),

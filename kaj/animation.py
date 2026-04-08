@@ -59,9 +59,8 @@ class Animation:
 
     def animate_heat_map_global(
         self,
-        latest_vf,
-        vf_interp,
-        latest_info,
+        verifier_timeline,
+        used_sets,
         real_path,
         pred_path,
         real_cost=None,
@@ -122,10 +121,13 @@ class Animation:
             yaw_grid[1:] + 2 * np.pi,
         ])
  
-        vf = latest_vf
-        t0_vf = latest_info["interval"][0]
-        dt_vf = self.HJ_TIMESTEP
-        vf_time_grid = t0_vf + np.arange(vf.shape[0]) * dt_vf
+        current_set_idx = used_sets[0]
+        _entry = verifier_timeline[current_set_idx]
+        vf = np.load(_entry['path'])
+        raw = vf
+        vf = np.concatenate([raw, raw[:,:,:,1:], raw[:,:,:,1:]], axis=3)
+        t0_vf = _entry['interval'][0]
+        vf_time_grid = t0_vf + np.arange(vf.shape[0]) * self.HJ_TIMESTEP
  
         yaw_min, yaw_max = self.HJ_GRID_MIN[2] - 2 * np.pi, self.HJ_GRID_MAX[2] + 2 * np.pi
         vel_min, vel_max = self.HJ_GRID_MIN[3], self.HJ_GRID_MAX[3]
@@ -447,8 +449,18 @@ class Animation:
         # Update function
         # ------------------------------------------------------------------
         def update(frame_idx_local):
-            nonlocal frame_idx
+            nonlocal frame_idx, current_set_idx, vf, vf_time_grid
             frame_idx = frame_idx_local
+
+            sid = used_sets[frame_idx] if frame_idx < len(used_sets) else used_sets[-1]
+            if sid != current_set_idx:
+                current_set_idx = sid
+                _entry = verifier_timeline[sid]
+                vf = np.load(_entry['path'])
+                raw = vf
+                vf = np.concatenate([raw, raw[:,:,:,1:], raw[:,:,:,1:]], axis=3)
+                t0_vf = _entry['interval'][0]
+                vf_time_grid = t0_vf + np.arange(vf.shape[0]) * self.HJ_TIMESTEP
  
             for ax in (ax1, ax2, ax3, ax4, ax5):
                 ax.clear()
@@ -743,12 +755,13 @@ class Animation:
 
 
         results = self.registry.get("results")
-        controller = Controller(self.registry, self.state_queue, self.stop_event)
+        verifier_timeline = self.registry.get('verifier.timeline', [])
+        ctl = self.registry.get('controller.timeline', {})
+        used_sets = ctl['used_sets']
 
         self.animate_heat_map_global(
-            latest_vf=results["latest_vf"],
-            vf_interp=results["vf_interp"],
-            latest_info=results["latest_info"],
+            verifier_timeline=verifier_timeline,
+            used_sets=used_sets,
             real_path=results["real_path"],
             pred_path=results["pred_path"],
             real_cost=results["real_cost"],

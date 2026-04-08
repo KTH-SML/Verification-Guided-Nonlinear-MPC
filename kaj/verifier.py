@@ -76,7 +76,7 @@ class Verifier:
 
     def run(self):
 
-        data_set_no = 1
+        data_set_no = 0
         path = "/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/kaj/sets/data_1.npy"
         if self.load_from_file:
             print(f"Loading set from {path}...")
@@ -121,7 +121,7 @@ class Verifier:
 
             # Record timeline entry (loop_end == compute_end: no sleep in file-load mode)
             timeline.append({
-                'set_idx':       data_set_no - 1,
+                'set_idx':       data_set_no,
                 'interval':      list(info['interval']),
                 'compute_start': compute_start,
                 'compute_end':   compute_end,
@@ -162,7 +162,7 @@ class Verifier:
             self.registry['foo.vf'] = vf
             self.registry['latest.info'] = info
 
-            self.save_set(out1, data_set_no)
+            path = self.save_set(out1, data_set_no)
 
             compute_end = tm.time()
 
@@ -173,11 +173,12 @@ class Verifier:
 
             # Record timeline entry
             timeline.append({
-                'set_idx':       data_set_no - 1,
+                'set_idx':       data_set_no,
                 'interval':      list(info['interval']),
                 'compute_start': compute_start,
                 'compute_end':   compute_end,
                 'loop_end':      loop_end,
+                'path':          path,
             })
             self.registry['verifier.timeline'] = list(timeline)
 
@@ -261,4 +262,6 @@ class Verifier:
         return obj
 
     def save_set(self, data, number):
-        np.save(f"{self.save_name}/data_{number}.npy", np.asarray(data))
+        path = f"{self.save_name}/data_{number}.npy"
+        np.save(path, np.asarray(data))
+        return path
