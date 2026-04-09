@@ -1,0 +1,10 @@
+.vscode/
+acados/
+__pycache__/
+.claude/
+c_generated_code/
+sets/
+vf_debug/
+acados_ocp.json
+timeline.png
+vf_debug.gif

@@ -10,6 +10,7 @@ from animation import Animation
 
 
 class Runtime:
+    
     def __init__(self):
         self.ctx = get_context("spawn")
         self.manager: SyncManager = self.ctx.Manager()

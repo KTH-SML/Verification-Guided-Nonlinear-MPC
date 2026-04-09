@@ -32,6 +32,9 @@ class Verifier:
 
     load_from_file = False
 
+    slice_time = [[0.0, 10.0], [5.0, 15.0], [10.0, 20.0], [15.0, 20.0]]
+
+    slice_data = False
 
     def __init__(self, registry, state_queue, stop_event):
 
@@ -133,7 +136,59 @@ class Verifier:
             break
 
         # Slow loop
-        while not self.load_from_file and self.registry.get('time', 0) <= self.HORIZON - 1.0:
+        while not self.load_from_file and not self.slice_data and self.registry.get('time', 0) <= self.HORIZON - 1.0:
+
+            compute_start = tm.time()
+
+            print(f"Computing Set {data_set_no}, at time {self.registry.get('time', 0)}")
+
+            env = self.build_env()
+            # static_obj = self.build_static_object()
+            # moving_obj = self.build_moving_object()
+
+            goal_x, goal_y = self.GOAL[0], self.GOAL[1]
+            goal_w, goal_h = self.GOAL[2], self.GOAL[3]
+
+            target_set = BoundedSet(x=(goal_x, goal_x + goal_w), y=(goal_y, goal_y + goal_h))
+
+            task = UNTIL(env['safe_region'], target_set)
+
+            info = {'interval': (0.0, self.HORIZON), 'name': 'foo'}
+
+            # task = self.create_task()
+
+            out1 = TLT.construct(task).realize(self.impl)
+
+            raw = np.asarray(out1)
+            vf = np.concatenate([raw, raw[:,:,:,1:], raw[:,:,:,1:]], axis=3)
+
+            self.registry['foo.vf'] = vf
+            self.registry['latest.info'] = info
+
+            path = self.save_set(out1, data_set_no)
+
+            compute_end = tm.time()
+
+            sleep_dur = max(0.0, 5.0 - (compute_end - compute_start))
+            tm.sleep(sleep_dur)
+
+            loop_end = tm.time()
+
+            # Record timeline entry
+            timeline.append({
+                'set_idx':       data_set_no,
+                'interval':      list(info['interval']),
+                'compute_start': compute_start,
+                'compute_end':   compute_end,
+                'loop_end':      loop_end,
+                'path':          path,
+            })
+            self.registry['verifier.timeline'] = list(timeline)
+
+            data_set_no += 1
+        
+        # Slow loop
+        while not self.load_from_file and self.slice_data:
 
             compute_start = tm.time()
 
