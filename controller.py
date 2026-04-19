@@ -195,19 +195,41 @@ class Controller:
 
         self.registry['time'] = time
         self.registry['state'] = state
-        
-        info = self.registry['latest.info']
 
-        if info['name'] != self.latest_info['name'] and info['interval'][0] <= time <= info['interval'][1]:
-            print(f"Controller: Detected new info '{info['name']}' from verifier, updating value function.")
-            
-            self.latest_info = info
-            self.latest_vf = self.registry[info['name'] + '.vf']
+        timeline = self.registry.get('verifier.timeline', [])
+        if not timeline:
+            return
 
-            # Build time grid for direct indexing
-            t0 = info['interval'][0]
-            HJ_NT = self.latest_vf.shape[0]
-            self.vf_time_grid = t0 + np.arange(HJ_NT) * self.HJ_TIMESTEP
+        current_interval = self.latest_info.get('interval', (-np.inf, -np.inf))
+
+        current_pos = -1
+        for i, entry in enumerate(timeline):
+            if entry['interval'] == list(current_interval):
+                current_pos = i
+                break
+
+        target = None
+        for entry in timeline[current_pos + 1:]:
+            i_start = entry['interval'][0]
+            is_first = (current_pos == -1 and target is None)
+            if is_first or time > i_start + self.TIMESTEP * 4:
+                target = entry
+                break
+
+        if target is None:
+            return
+
+        print(f"Controller: switching to set_idx={target['set_idx']} interval={target['interval']}")
+
+        self.latest_info = {
+            'name':     target['path'],
+            'interval': target['interval'],
+        }
+        raw = np.load(target['path'])
+        self.latest_vf = np.concatenate([raw, raw[:,:,:,1:], raw[:,:,:,1:]], axis=3)
+
+        t0 = target['interval'][0]
+        self.vf_time_grid = t0 + np.arange(self.latest_vf.shape[0]) * self.HJ_TIMESTEP
 
     def _current_set_idx(self) -> int:
         """Return the set_idx of the currently active verification set, or -1 if unknown."""
@@ -487,7 +509,7 @@ class Controller:
         # Timeline: list of set_idx used at each MPC step (index k → used set)
         used_sets: list = []
 
-        while self.registry.get("latest.info") is None:
+        while self.registry.get("verifier.timeline") is None:
             if self.stop_event.is_set():
                 return
             tm.sleep(0.1)

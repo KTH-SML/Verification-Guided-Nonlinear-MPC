@@ -32,9 +32,9 @@ class Verifier:
 
     load_from_file = False
 
-    slice_time = [[0.0, 10.0], [5.0, 15.0], [10.0, 20.0], [15.0, 20.0]]
+    slice_data = True
 
-    slice_data = False
+    slice_time = [[0.0, 10.0], [5.0, 15.0], [10.0, 20.0], [15.0, 20.0]]
 
     def __init__(self, registry, state_queue, stop_event):
 
@@ -183,62 +183,48 @@ class Verifier:
                 'loop_end':      loop_end,
                 'path':          path,
             })
+
             self.registry['verifier.timeline'] = list(timeline)
 
             data_set_no += 1
         
         # Slow loop
-        while not self.load_from_file and self.slice_data:
+        if not self.load_from_file and self.slice_data:
 
-            compute_start = tm.time()
+            for slice_idx, (t_start, t_end) in enumerate(self.slice_time):
 
-            print(f"Computing Set {data_set_no}, at time {self.registry.get('time', 0)}")
+                compute_start = tm.time()
+                print(f"Computing set {slice_idx}: slice [{t_start}, {t_end}]")
 
-            env = self.build_env()
-            # static_obj = self.build_static_object()
-            # moving_obj = self.build_moving_object()
+                env = self.build_env()
+                goal_x, goal_y = self.GOAL[0], self.GOAL[1]
+                goal_w, goal_h = self.GOAL[2], self.GOAL[3]
+                target_set = BoundedSet(x=(goal_x, goal_x + goal_w), y=(goal_y, goal_y + goal_h))
+                task = UNTIL(env['safe_region'], target_set)
 
-            goal_x, goal_y = self.GOAL[0], self.GOAL[1]
-            goal_w, goal_h = self.GOAL[2], self.GOAL[3]
+                out = TLT.construct(task).realize(self.impl)
+                raw = np.asarray(out)   # shape: [T, 25, 25, 37, 17]
 
-            target_set = BoundedSet(x=(goal_x, goal_x + goal_w), y=(goal_y, goal_y + goal_h))
+                path, interval = self.slice_and_save(raw, t_start, t_end, slice_idx)
 
-            task = UNTIL(env['safe_region'], target_set)
+                compute_end = tm.time()
 
-            info = {'interval': (0.0, self.HORIZON), 'name': 'foo'}
+                sleep_dur = max(0.0, 5.0 - (compute_end - compute_start))
+                tm.sleep(sleep_dur)
 
-            # task = self.create_task()
+                loop_end = tm.time()
+                # print(f"  Saved slice {slice_idx} → {path}  ({compute_end - compute_start:.1f}s)")
 
-            out1 = TLT.construct(task).realize(self.impl)
 
-            raw = np.asarray(out1)
-            vf = np.concatenate([raw, raw[:,:,:,1:], raw[:,:,:,1:]], axis=3)
-
-            self.registry['foo.vf'] = vf
-            self.registry['latest.info'] = info
-
-            path = self.save_set(out1, data_set_no)
-
-            compute_end = tm.time()
-
-            sleep_dur = max(0.0, 5.0 - (compute_end - compute_start))
-            tm.sleep(sleep_dur)
-
-            loop_end = tm.time()
-
-            # Record timeline entry
-            timeline.append({
-                'set_idx':       data_set_no,
-                'interval':      list(info['interval']),
-                'compute_start': compute_start,
-                'compute_end':   compute_end,
-                'loop_end':      loop_end,
-                'path':          path,
-            })
-            self.registry['verifier.timeline'] = list(timeline)
-
-            data_set_no += 1
-
+                timeline.append({
+                    'set_idx':       slice_idx,
+                    'interval':      interval,
+                    'compute_start': compute_start,
+                    'compute_end':   compute_end,
+                    'loop_end':      loop_end,
+                    'path':          path,
+                })
+                self.registry['verifier.timeline'] = list(timeline)
 
     def close(self):
         pass
@@ -320,3 +306,11 @@ class Verifier:
         path = f"{self.save_name}/data_{number}.npy"
         np.save(path, np.asarray(data))
         return path
+
+    def slice_and_save(self, raw: np.ndarray, t_start: float, t_end: float, idx: int) -> str:
+        i_start = int(t_start / self.TIMESTEP)
+        i_end   = int(t_end   / self.TIMESTEP)
+        sliced  = raw[i_start:i_end]          # shape: [i_end-i_start, 25, 25, 37, 17]
+        path    = f"{self.save_name}/slice_{idx}.npy"
+        np.save(path, sliced)
+        return path, [t_start, t_end]
