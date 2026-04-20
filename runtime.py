@@ -3,7 +3,8 @@ from multiprocessing.managers import SyncManager
 from multiprocessing.shared_memory import SharedMemory
 
 import config
-from verifier import Verifier
+# from verifier import Verifier
+from verifier_btree import Verifier
 from controller import Controller
 # from controller_rgi import Controller
 from animation import Animation
