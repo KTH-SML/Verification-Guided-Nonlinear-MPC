@@ -8,6 +8,7 @@ import shutil
 from tqdm import tqdm
 
 from controller import Controller
+from obstacles import obstacle_rects
 
 class Animation:
 
@@ -24,6 +25,8 @@ class Animation:
         self.HJ_GRID_STP = [axis['points'] for axis in self.config['verifier']['axes'] if axis['name'] != 't']
 
         self.OBSTACLES = self.config['obstacles']
+        self.DYN_OBS = self.config['dynamic_obstacle']
+        self.T_PRED = self.config['verifier']['t_prediction']
 
     @staticmethod
     def _wrap_yaw(yaw):
@@ -170,6 +173,23 @@ class Animation:
                         zorder=5,
                     )
                 )
+
+        # ------------------------------------------------------------------
+        # Helper: draw the moving obstacle at its position for time t
+        # ------------------------------------------------------------------
+        def _draw_dynamic_obstacle(ax, t):
+            for ox, oy, ow, oh in obstacle_rects(t, self.DYN_OBS):
+                ax.add_patch(
+                    plt.Rectangle(
+                        (ox, oy), ow, oh,
+                        linewidth=1.5,
+                        edgecolor="white",
+                        facecolor="crimson",
+                        alpha=0.7,
+                        zorder=7,
+                        label="dynamic obstacle",
+                    )
+                )
  
         # ------------------------------------------------------------------
         # Helper: heading arrow
@@ -248,7 +268,7 @@ class Animation:
         # ------------------------------------------------------------------
         # Panel 1/5 shared: XY heat map base
         # ------------------------------------------------------------------
-        def _plot_xy_base(ax, Z, x_lim, y_lim):
+        def _plot_xy_base(ax, Z, x_lim, y_lim, t):
             zmin, zmax = np.min(Z), np.max(Z)
             if zmax - zmin > 1e-10:
                 ax.contourf(
@@ -268,6 +288,7 @@ class Animation:
                 ax.contour(x_grid, y_grid, Z.T,
                            levels=[0.0], colors="red", linewidths=2.0)
             _draw_obstacles_local(ax)
+            _draw_dynamic_obstacle(ax, t)
             ax.set_xlim(x_lim)
             ax.set_ylim(y_lim)
             ax.set_aspect("equal", adjustable="box")
@@ -277,7 +298,7 @@ class Animation:
         # Panel 1: raw XY + real path + prediction + -∇V arrows
         # ------------------------------------------------------------------
         def _plot_xy_panel(ax, Z, title, t, x, y, yaw, pred, it_):
-            _plot_xy_base(ax, Z, (x_min, x_max), (y_min, y_max))
+            _plot_xy_base(ax, Z, (x_min, x_max), (y_min, y_max), t)
  
             ax.plot(
                 real_path[:frame_idx + 1, 1],
@@ -416,7 +437,7 @@ class Animation:
             lx_min, lx_max = x - window, x + window
             ly_min, ly_max = y - window, y + window
  
-            _plot_xy_base(ax, Z, (lx_min, lx_max), (ly_min, ly_max))
+            _plot_xy_base(ax, Z, (lx_min, lx_max), (ly_min, ly_max), t)
  
             ax.plot(x, y, "ro", markersize=8, zorder=7, label="current")
  
@@ -449,7 +470,7 @@ class Animation:
         # Update function
         # ------------------------------------------------------------------
         def update(frame_idx_local):
-            nonlocal frame_idx, current_set_idx, vf, vf_time_grid
+            nonlocal frame_idx, current_set_idx, vf, vf_time_grid, t0_vf
             frame_idx = frame_idx_local
 
             sid = used_sets[frame_idx] if frame_idx < len(used_sets) else used_sets[-1]
@@ -476,14 +497,17 @@ class Animation:
             iyaw = self._nearest_index(yaw_grid_full, yaw)
             ivel = self._nearest_index(vel_grid,      vel)
  
-            # shared raw XY slice
+            # raw XY slice at the car's current yaw and vel
             Z_xy_real = vf[it, :, :, iyaw, ivel]
+            # XY projection at time t: min over yaw and vel, i.e. the union
+            # over all headings/speeds (same as pyspect's impl.plot(axes=('x','y')))
+            Z_xy_proj = vf[it].min(axis=(2, 3))
  
             # ----------------------------------------------------------------
-            # 1) Raw XY + -∇V arrows on predicted trajectory
+            # 1) Projected XY + -∇V arrows on predicted trajectory
             # ----------------------------------------------------------------
-            _plot_xy_panel(ax1, Z_xy_real,
-                           "Raw Value Function (X vs Y)",
+            _plot_xy_panel(ax1, Z_xy_proj,
+                           "V at t, min over (yaw, vel)",
                            t, x, y, yaw, pred, it)
  
             # ----------------------------------------------------------------
@@ -526,7 +550,7 @@ class Animation:
             # ----------------------------------------------------------------
             # 5) Local zoom: current point + -∇V arrows
             # ----------------------------------------------------------------
-            _plot_local_panel(ax5, Z_xy_real, t, x, y, yaw, pred, it)
+            _plot_local_panel(ax5, Z_xy_proj, t, x, y, yaw, pred, it)
  
             fig.suptitle(f"t = {t:.2f}", fontsize=14)
             fig.tight_layout()

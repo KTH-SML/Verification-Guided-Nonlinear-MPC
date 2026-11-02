@@ -13,7 +13,7 @@ MAX_ACCEL_VERIFIER = 0.5    # m/s^2
 MAX_STEER_VERIFIER = 0.6    # rad
 
 # MPC (controller) limits
-MAX_VEL_MPC        = 1.0    # m/s
+MAX_VEL_MPC        = MAX_VEL_VERIFIER    # m/s, must not exceed the HJ velocity grid
 MAX_ACCEL_MPC      = 0.8    # m/s^2
 MAX_STEER_MPC      = 0.7    # rad
 
@@ -22,7 +22,8 @@ MAX_STEER_MPC      = 0.7    # rad
 # ------------------------------------------------------------------
 
 HJ_TIMESTEP = 0.2    # s
-HJ_HORIZON  = 20.0   # s
+HJ_HORIZON  = 35.0   # s
+HJ_PREDICTION = 2.0  # s
 
 # ------------------------------------------------------------------
 # MPC (controller)
@@ -30,7 +31,14 @@ HJ_HORIZON  = 20.0   # s
 
 MPC_TIMESTEP = 0.1  # s
 MPC_N        = 5    # horizon steps  →  total horizon = N * TIMESTEP = 0.6 s
-Qhj          = 1.0        # cost weight for HJ value function guidance
+Qhj          = 3.0        # cost weight for the time-to-reach (progress) map
+
+# Safety constraint V_safe(x_k) <= -SAFETY_MARGIN at every MPC stage.
+# Soft (slack) with a large penalty: identical to a hard constraint whenever a
+# safe solution exists, but the solver does not break on small violations.
+SAFETY_MARGIN   = 0.07    # extra margin on the value function
+SAFETY_SLACK_L1 = 1e3     # linear penalty on the slack
+SAFETY_SLACK_L2 = 1e2     # quadratic penalty on the slack
 
 # ------------------------------------------------------------------
 # Map
@@ -54,6 +62,22 @@ OBSTACLES = [
 
 # Goal region: (x_min, y_min, width, height)
 GOAL = (3.58, 3.46, 0.30, 0.36)
+
+# ------------------------------------------------------------------
+# Dynamic (moving) obstacle
+# Crosses the whole band between_y, entering it at each time in `crossings`
+# and leaving it through the far side (alternating direction: +speed on even
+# index, -speed on odd). One crossing lasts (band + length) / speed.
+# Shared by verifier.py (HJ reachability) and animation.py (visualization)
+# so both use the exact same obstacle model.
+# ------------------------------------------------------------------
+
+DYN_OBS_SPEED     = 0.09                  # m/s
+DYN_OBS_WIDTH     = 0.4                  # m (x-extent)
+DYN_OBS_LENGTH    = 0.5                  # m (y-extent)
+DYN_OBS_CENTER_X  = 2.0
+DYN_OBS_BETWEEN_Y = (3.0, 4.0)
+DYN_OBS_CROSSINGS = [0.4, 5.5, 10.5, 15.5]   # s
 
 # State-space axes (spatial only, no time)
 # '*' prefix means periodic (pyspect convention);
@@ -92,6 +116,7 @@ def run(registry):
             # HJ reachability
             timestep  = HJ_TIMESTEP,
             horizon   = HJ_HORIZON,
+            t_prediction = HJ_PREDICTION,
             axes         = AXES,
         ),
         # MPC
@@ -104,8 +129,19 @@ def run(registry):
             timestep = MPC_TIMESTEP,
             n        = MPC_N,
             qhj      = Qhj,
+            safety_margin   = SAFETY_MARGIN,
+            safety_slack_l1 = SAFETY_SLACK_L1,
+            safety_slack_l2 = SAFETY_SLACK_L2,
         ),
         # Environment
         obstacles    = OBSTACLES,
         goal         = GOAL,
+        dynamic_obstacle = dict(
+            speed     = DYN_OBS_SPEED,
+            width     = DYN_OBS_WIDTH,
+            length    = DYN_OBS_LENGTH,
+            center_x  = DYN_OBS_CENTER_X,
+            between_y = DYN_OBS_BETWEEN_Y,
+            crossings = DYN_OBS_CROSSINGS,
+        ),
     )

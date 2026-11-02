@@ -11,6 +11,8 @@ from pyspect import *
 from pyspect.impls.hj_reachability import TVHJImpl
 from pyspect.systems.hj_reachability.bicycle4d import Bicycle4D
 
+from obstacles import crossing_events
+
 
 @primitive(ALWAYS('_1'))
 def Always_rci(_1: 'TLTLike') -> tuple[SetBuilder, APPROXDIR]:
@@ -62,6 +64,7 @@ class Verifier:
         self.YW = cfg['YW']
 
         self.OBSTACLES = cfg['obstacles']
+        self.DYN_OBS = cfg['dynamic_obstacle']
 
         self.AXES = cfg['verifier']['axes']
 
@@ -69,7 +72,17 @@ class Verifier:
                         min_steer=-self.MAX_STEER, max_steer=self.MAX_STEER,
                         min_accel=-self.MAX_ACCEL, max_accel=self.MAX_ACCEL,
                         wheelbase=self.WHEELBASE)
-        self.impl = TVHJImpl(dynamics, self.AXES)
+        self.impl = TVHJImpl(dynamics.copy(), self.AXES)
+
+        self.T_PRED = cfg['verifier']['t_prediction']
+        self.LOCAL_AXES = []
+        for ax in self.AXES:
+            if ax['name'] == 't':
+                self.LOCAL_AXES.append(dict(name='t', bounds=[0.0, self.T_PRED], step=self.TIMESTEP))
+            else:
+                self.LOCAL_AXES.append(dict(ax))
+
+        self.impl_local = TVHJImpl(dynamics.copy(), self.LOCAL_AXES)
 
         if not self.load_from_file:
             # Remove existing directory if it exists, to ensure a clean save
@@ -80,7 +93,8 @@ class Verifier:
     def run(self):
 
         data_set_no = 0
-        path = "/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/kaj/sets/data_1.npy"
+        # path = "/home/tokisaki_kurumi/Projects/svea/verification_guided_mpc/kaj/sets/data_1.npy"
+        path = os.path.join(self.save_name, "data_0.npy")
         if self.load_from_file:
             print(f"Loading set from {path}...")
         else:
@@ -90,6 +104,23 @@ class Verifier:
         # Each entry: {set_idx, interval, compute_start, compute_end, loop_end}
         # compute_start / compute_end / loop_end are wall-clock times (absolute).
         timeline: list = []
+        print(f"Computing Global Set (out1) for {self.HORIZON}s...")
+        compute_start = tm.time()
+
+        env = self.build_env()
+        task_global = UNTIL(env['safe_region'], env['target_loc'])
+        out1 = TLT.construct(task_global).realize(self.impl)
+
+        compute_end = tm.time()
+        print(f"Global Set computed in {compute_end - compute_start:.2f}s.")
+        T_DELAY = self.T_PRED
+
+        # Progress map for the MPC cost, computed once: minimum time to reach the goal
+        # from every state (static obstacles only). Yaw is extended like the local sets.
+        ttr = self.time_to_reach(out1)
+        ttr = ttr.min(axis=(2, 3), keepdims=True) * np.ones_like(ttr)
+        self.registry['progress.ttr'] = np.concatenate([ttr, ttr[:, :, 1:], ttr[:, :, 1:]], axis=2)
+        print(f"[Verifier] Time-to-reach map published (max {ttr.max():.2f} s).")
 
         while self.load_from_file:
 
@@ -136,56 +167,92 @@ class Verifier:
             break
 
         # Slow loop
-        while not self.load_from_file and not self.slice_data and self.registry.get('time', 0) <= self.HORIZON - 1.0:
+        while not self.load_from_file and not self.slice_data and self.registry.get('time', 0.0) <= self.HORIZON - 1.0:
 
-            compute_start = tm.time()
+            current_time = float(self.registry.get('time', 0.0))
+            
+            if data_set_no == 0:
+                t_plan_start = current_time
+            else:
+                t_plan_start = current_time + T_DELAY
 
-            print(f"Computing Set {data_set_no}, at time {self.registry.get('time', 0)}")
+            t_plan_end = min(t_plan_start + self.T_PRED, self.HORIZON)
 
-            env = self.build_env()
-            # static_obj = self.build_static_object()
-            # moving_obj = self.build_moving_object()
+            window_duration = t_plan_end - t_plan_start
 
-            goal_x, goal_y = self.GOAL[0], self.GOAL[1]
-            goal_w, goal_h = self.GOAL[2], self.GOAL[3]
+            # Window starts at/after the horizon: nothing left to verify
+            if window_duration < self.TIMESTEP:
+                print(f"[Verifier] Stop: window [{t_plan_start:.2f} s -> {t_plan_end:.2f} s] is empty.")
+                break
 
-            target_set = BoundedSet(x=(goal_x, goal_x + goal_w), y=(goal_y, goal_y + goal_h))
+            # The window starts T_DELAY in the future, so the current state is
+            # used as an approximation of the state at t_plan_start.
+            state_now = self.registry.get('state', self.registry['x0'])
 
-            task = UNTIL(env['safe_region'], target_set)
+            print(f"\n" + "=" * 65)
+            print(f"[Verifier] Start computing set {data_set_no}")
+            print(f"  • Current simulation time: {current_time:.2f} s")
+            print(f"  • Planned horizon:      [{t_plan_start:.2f} s -> {t_plan_end:.2f} s] (Duration: {window_duration:.2f} s)")
+            print(f"=" * 65)
+            loop_start = tm.time()
 
-            info = {'interval': (0.0, self.HORIZON), 'name': 'foo'}
+            moving_obj_local = self.build_moving_object_local(t_plan_start, min(self.T_PRED, t_plan_end - t_plan_start))
 
-            # task = self.create_task()
+            safe_region_local = Inter(env['safe_region'], Compl(moving_obj_local))
+            # safe_region_local = env['safe_region']
 
-            out1 = TLT.construct(task).realize(self.impl)
+            # Safety set (used as a constraint by the MPC): avoid all obstacles during the
+            # window and end in a state from which the goal is still reachable at all.
+            # Global slice at t = 0 = largest time budget, so waiting is never "unsafe".
+            target_local = self.get_local_terminal_target(out1, t_plan_end)
+            task_local = UNTIL(safe_region_local, target_local)
 
-            raw = np.asarray(out1)
-            vf = np.concatenate([raw, raw[:,:,:,1:], raw[:,:,:,1:]], axis=3)
+            pde_start = tm.time()
+            out2 = TLT.construct(task_local).realize(self.impl_local)
+            pde_end = tm.time()
 
-            self.registry['foo.vf'] = vf
+            raw = np.asarray(out2)
+            vf = np.concatenate([raw, raw[:, :, :, 1:], raw[:, :, :, 1:]], axis=3)
+
+            set_name = f'set_{data_set_no}'
+            info = {'interval': (t_plan_start, t_plan_end), 'name': set_name}
+
+            self.registry[f'{set_name}.vf'] = vf
             self.registry['latest.info'] = info
 
-            path = self.save_set(out1, data_set_no)
+            path = self.save_set(out2, data_set_no)
 
-            compute_end = tm.time()
-
-            sleep_dur = max(0.0, 5.0 - (compute_end - compute_start))
-            tm.sleep(sleep_dur)
+            # Diagnostic only: is the current state inside the safety set?
+            v_local = self.local_value(out2, state_now)
+            safe = v_local <= 0.0
 
             loop_end = tm.time()
 
-            # Record timeline entry
+            compute_duration = loop_end - loop_start
+            pde_duration = pde_end - pde_start
+            sim_time_after = float(self.registry.get('time', current_time))
+
+            print(f"[Verifier] Computed set {data_set_no}")
+            print(f"  • Total computation time (CPU): {compute_duration:.2f} s (PDE: {pde_duration:.2f} s)")
+            print(f"  • Simulation time after computation: {sim_time_after:.2f} s")
+            print(f"  • Remaining time in the set:     {t_plan_end - sim_time_after:.2f} s")
+            print(f"  • Safe at current state:         {'YES' if safe else 'NO'} (V = {v_local:+.3f})")
+            print(f"=" * 65 + "\n")
+
             timeline.append({
                 'set_idx':       data_set_no,
                 'interval':      list(info['interval']),
-                'compute_start': compute_start,
-                'compute_end':   compute_end,
+                'compute_start': loop_start,
+                'compute_end':   loop_end,
                 'loop_end':      loop_end,
                 'path':          path,
+                'safe':          safe,
             })
             self.registry['verifier.timeline'] = list(timeline)
 
             data_set_no += 1
+
+            tm.sleep(0.05)
         
         # Slow loop
         while not self.load_from_file and self.slice_data:
@@ -195,8 +262,6 @@ class Verifier:
             print(f"Computing Set {data_set_no}, at time {self.registry.get('time', 0)}")
 
             env = self.build_env()
-            # static_obj = self.build_static_object()
-            # moving_obj = self.build_moving_object()
 
             goal_x, goal_y = self.GOAL[0], self.GOAL[1]
             goal_w, goal_h = self.GOAL[2], self.GOAL[3]
@@ -239,6 +304,59 @@ class Verifier:
 
             data_set_no += 1
 
+    def time_to_reach(self, out1):
+        """
+        Minimum time to reach the goal from every grid state, shape (x, y, yaw, vel).
+
+        out1 is a backward reachable set: at global time t_g the remaining budget
+        is HORIZON - t_g, and the sets grow backward in time. The last time index
+        where a state is inside the set gives its minimum time-to-go (same idea as
+        the old crop_to_t_max, applied to the whole grid at once).
+        States that never reach the goal (e.g. inside obstacles) get the full horizon.
+        """
+        vals = np.asarray(out1)
+        time_grid = np.array(self.impl.timeline)
+
+        inside = vals <= 0.0
+        last_idx = vals.shape[0] - 1 - np.argmax(inside[::-1], axis=0)
+
+        ttr = time_grid[-1] - time_grid[last_idx]
+        ttr[~inside.any(axis=0)] = time_grid[-1] - time_grid[0]
+        return ttr
+
+    def state_indices(self, state):
+        """Nearest (ix, iy, iyaw, ivel) grid indices of a state [x, y, yaw, vel]."""
+        x_val, y_val, yaw_val, vel_val = state[:4]
+
+        # wrap yaw into [-pi, pi) to match the periodic grid
+        yaw_val = (yaw_val + pi) % (2 * pi) - pi
+
+        coords = [np.array(c) for c in self.impl.grid.coordinate_vectors]
+        return tuple(int(np.argmin(np.abs(c - v)))
+                     for c, v in zip(coords, (x_val, y_val, yaw_val, vel_val)))
+
+    def local_value(self, out2, state):
+        """Value of the local set at the start of its window (local t = 0) for the given state.
+        <= 0: the state can avoid all obstacles during the window and still reach the goal."""
+        return float(np.asarray(out2)[(0, *self.state_indices(state))])
+
+    def get_local_terminal_target(self, out1_global, t_global: float):
+        """Terminal target for the local problem: global set sliced at global time t_global."""
+        t_target = min(t_global, self.HORIZON)
+
+        time_grid = np.array(self.impl.timeline)
+        idx_target = int(np.argmin(np.abs(time_grid - t_target)))
+
+        v_terminal_4d = np.asarray(out1_global)[idx_target, ...]
+
+        goal_x, goal_y = self.GOAL[0], self.GOAL[1]
+        goal_w, goal_h = self.GOAL[2], self.GOAL[3]
+        target_set = BoundedSet(x=(goal_x, goal_x + goal_w), y=(goal_y, goal_y + goal_h))
+        sdf_goal = target_set(self.impl_local)
+
+        v_combined = np.minimum(v_terminal_4d, sdf_goal)
+
+        return Set(v_combined)
 
     def close(self):
         pass
@@ -281,42 +399,57 @@ class Verifier:
         _y0 = between_y[0] # static obstacle initial y position
         return BoundedSet(x=(_x-_w/2, _x+_w/2), y=(_y0-_l/2, _y0+_l/2))
 
-    def build_moving_object(
-            self, 
-            speed=0.3,
-            width=0.4,
-            length=1.0,
-            center_x=2.0,
-            between_y=(3.0, 3.5),
-        ):
+    def _above_line(self, y0: float, t0: float, v: float, duration: float):
+        """
+        Set {y >= y0 + v * (t - t0)} on the local grid t in [0, duration].
 
-        # Forward being in direction of y
-        _v = speed # moving obstacle speed
-        _w = width # moving obstacle width
-        _x = center_x # moving obstacle center x
-        _l = length # moving obstacle length
-        _y = between_y[0] # moving obstacle initial y position
-        boundary = BoundedSet(x=(_x-_w/2, _x+_w/2), y=between_y)
-        obj = EMPTY
-        for i, t in enumerate([0.1, 5.1, 10.1, 15.1, 19.1]):
-            __v = +_v if i % 2 == 0 else -_v
-            __t = t + 0.5 if i % 2 == 0 else t - 0.5
-            infront_obj = HalfSpaceSet(normal=[     +1, -__v],
-                                       offset=[_y+_l/2,    t],
-                                       axes = [    'y',  't'])
+        pyspect requires the half-space offset to lie inside the axis bounds,
+        so the anchor is slid *along* the line into the grid box instead of
+        clamping t0 (which would shift the line in time). If the line misses
+        the box entirely the set is either empty or everything.
+        """
+        y_start = y0 + v * (0.0 - t0)
+        y_end = y0 + v * (duration - t0)
+        if min(y_start, y_end) > self.YW:
+            return EMPTY
+        if max(y_start, y_end) < self.Y0:
+            return Compl(EMPTY)
+        y_a = float(np.clip(y_start, self.Y0, self.YW))
+        t_a = float(np.clip(t0 + (y_a - y0) / v, 0.0, duration))
+        y_a = float(np.clip(y0 + v * (t_a - t0), self.Y0, self.YW))
+        return HalfSpaceSet(normal=[+1, -v], offset=[y_a, t_a], axes=['y', 't'])
 
-            behind_obj = HalfSpaceSet(normal=[     -1, +__v],
-                                      offset=[_y-_l/2,  __t],
-                                      axes = [    'y',  't'])
-            obj = Union(obj, reduce(Inter, [
-                Compl(infront_obj), 
-                Compl(behind_obj),
+    def build_moving_object_local(self, t_start: float, duration: float):
+
+        p = self.DYN_OBS
+        _w = p['width']
+        _x = p['center_x']
+
+        # pyspect wants bounds strictly inside the grid; Ellipsis = up to the map edge
+        y_bot, y_top = p['between_y']
+        band_y = (... if y_bot <= self.Y0 else y_bot, ... if y_top >= self.YW else y_top)
+        boundary = BoundedSet(x=(_x - _w / 2, _x + _w / 2), y=band_y)
+
+        local_obj = EMPTY
+        for i, v, y_lo0, y_hi0, t_enter, t_exit in crossing_events(p):
+            # skip crossings that do not overlap this window
+            if t_exit < t_start or t_enter > t_start + duration:
+                continue
+            t_loc = t_enter - t_start
+
+            above_back = self._above_line(y_lo0, t_loc, v, duration)
+            below_front = Compl(self._above_line(y_hi0, t_loc, v, duration))
+
+            local_obj = Union(local_obj, reduce(Inter, [
+                above_back,
+                below_front,
                 boundary,
             ]))
 
-        return obj
+        return local_obj
 
     def save_set(self, data, number):
-        path = f"{self.save_name}/data_{number}.npy"
+        os.makedirs(self.save_name, exist_ok=True)
+        path = os.path.join(self.save_name, f"data_{number}.npy")
         np.save(path, np.asarray(data))
         return path

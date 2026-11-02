@@ -138,6 +138,9 @@ class Runtime:
         t0 = 0.0
         x0 = [3.0, 0.5, pi/2, 0.0]
 
+        self.registry['x0'] = x0
+        self.registry['t0'] = t0
+
         try:
             self.start(
                 verifier_args=(),

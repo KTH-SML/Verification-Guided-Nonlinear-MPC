@@ -8,3 +8,13 @@ vf_debug/
 acados_ocp.json
 timeline.png
 vf_debug.gif
+Bicycle4D_*
+acados_*
+libacados_*
+*.so
+*.o
+c_generated_code/
+Makefile
+main_ocp_*
+*.npy
+vf_debug/

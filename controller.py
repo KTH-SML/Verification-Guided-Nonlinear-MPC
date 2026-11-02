@@ -28,16 +28,21 @@ def get_input(name, seq=None):
     return INPUT[name] if seq is None else seq[INPUT[name]]
 
 
-# Diagonal quadratic HJ surrogate:
-#   hat(V)_k(x) = a_k + g_k^T (x - xbar_k) + 0.5 * hdiag_k ⊙ (x - xbar_k)^2
+# Diagonal quadratic surrogates around xbar_k, for two grid functions:
+#   hat(F)_k(x) = a_k + g_k^T (x - xbar_k) + 0.5 * hdiag_k ⊙ (x - xbar_k)^2
+#   - progress: time-to-reach map TTR(x)        -> cost
+#   - safety:   local HJ value function V(t, x) -> constraint V <= -margin
 #
 # Parameter layout per stage:
-#   [xbar(4), a(1), g(4), hdiag(4)]  =>  NP = 13
+#   [xbar(4), a(1), g(4), hdiag(4), sa(1), sg(4), shdiag(4)]  =>  NP = 22
 PARAM = {name: s for name, s in accum([
-    ("xbar",  NX),   # Linearization point
-    ("a",     1),    # V(xbar)
-    ("g",     NX),   # grad V(xbar)       — linear term
-    ("hdiag", NX),   # diag Hessian V(xbar) — quadratic term (clamped >= 0)
+    ("xbar",   NX),   # Linearization point
+    ("a",      1),    # TTR(xbar)
+    ("g",      NX),   # grad TTR(xbar)        — linear term
+    ("hdiag",  NX),   # diag Hessian TTR(xbar) — quadratic term (clamped >= 0)
+    ("sa",     1),    # V(xbar)
+    ("sg",     NX),   # grad V(xbar)
+    ("shdiag", NX),   # diag Hessian V(xbar) (clamped >= 0)
 ])}
 NP = max(s.stop for s in PARAM.values())
 
@@ -60,6 +65,9 @@ class Controller:
         self.N = self.config['controller']['n']
         self.TIMESTEP = self.config['controller']['timestep']
         self.Qhj = self.config['controller']['qhj']
+        self.safety_margin = self.config['controller']['safety_margin']
+        self.safety_slack_l1 = self.config['controller']['safety_slack_l1']
+        self.safety_slack_l2 = self.config['controller']['safety_slack_l2']
 
         # Model parameters
         self.L = 0.32   # Wheelbase length (m)
@@ -142,21 +150,28 @@ class Controller:
         f_v     = _state("vel") + dt * _input("accel")
         model.disc_dyn_expr = ca.vertcat(f_x, f_y, f_th, f_v)
 
-        # Diagonal quadratic HJ surrogate:
-        #   hat(V)(x) = a + g^T dz + 0.5 * hdiag ⊙ dz^2
+        # Diagonal quadratic surrogates:
+        #   hat(F)(x) = a + g^T dz + 0.5 * hdiag ⊙ dz^2
         # where dz = x - xbar
         dz = model.x - _param("xbar")
-        vf_interp = (
+        ttr_interp = (
             _param("a")
             + ca.dot(_param("g"), dz)
             + 0.5 * ca.dot(_param("hdiag"), dz * dz)
         )
+        vf_interp = (
+            _param("sa")
+            + ca.dot(_param("sg"), dz)
+            + 0.5 * ca.dot(_param("shdiag"), dz * dz)
+        )
 
-        # Stage Cost
-        model.cost_expr_ext_cost = self.Qhj * vf_interp
+        # Stage and terminal cost: go towards the goal as fast as possible
+        model.cost_expr_ext_cost = self.Qhj * ttr_interp
+        model.cost_expr_ext_cost_e = self.Qhj * ttr_interp
 
-        # Terminal Cost
-        model.cost_expr_ext_cost_e = self.Qhj * vf_interp * 0.0
+        # Safety constraint on stages 1..N (stage 0 is the fixed measured state)
+        model.con_h_expr = vf_interp
+        model.con_h_expr_e = vf_interp
 
         return model
 
@@ -181,6 +196,22 @@ class Controller:
         ocp.constraints.ubx_e   = ocp.constraints.ubx
         ocp.constraints.idxbx_e = ocp.constraints.idxbx
 
+        # Safety: V(t_k, x_k) <= -margin, softened with a large slack penalty
+        v_lower = np.array([-1e6])
+        v_upper = np.array([-self.safety_margin])
+        l1 = np.array([self.safety_slack_l1])
+        l2 = np.array([self.safety_slack_l2])
+
+        ocp.constraints.lh    = v_lower
+        ocp.constraints.uh    = v_upper
+        ocp.constraints.idxsh = np.array([0])
+        ocp.cost.zl, ocp.cost.zu, ocp.cost.Zl, ocp.cost.Zu = l1, l1, l2, l2
+
+        ocp.constraints.lh_e    = v_lower
+        ocp.constraints.uh_e    = v_upper
+        ocp.constraints.idxsh_e = np.array([0])
+        ocp.cost.zl_e, ocp.cost.zu_e, ocp.cost.Zl_e, ocp.cost.Zu_e = l1, l1, l2, l2
+
         # Input bounds
         ocp.constraints.lbu   = np.array([self.min_acceleration, self.min_steering])
         ocp.constraints.ubu   = np.array([self.max_acceleration, self.max_steering])
@@ -196,18 +227,26 @@ class Controller:
         self.registry['time'] = time
         self.registry['state'] = state
         
-        info = self.registry['latest.info']
+        info = self.registry.get('latest.info', None)
+        if info is None:
+            return
 
-        if info['name'] != self.latest_info['name'] and info['interval'][0] <= time <= info['interval'][1]:
-            print(f"Controller: Detected new info '{info['name']}' from verifier, updating value function.")
-            
-            self.latest_info = info
-            self.latest_vf = self.registry[info['name'] + '.vf']
+        current_set_name = str(info['name'])
+        t_start, t_end = float(info['interval'][0]), float(info['interval'][1])
 
-            # Build time grid for direct indexing
-            t0 = info['interval'][0]
-            HJ_NT = self.latest_vf.shape[0]
-            self.vf_time_grid = t0 + np.arange(HJ_NT) * self.HJ_TIMESTEP
+        if not hasattr(self, 'current_loaded_set_name'):
+            self.current_loaded_set_name = None
+
+        if current_set_name != self.current_loaded_set_name:
+            if t_start <= time <= t_end:
+                print(f"[Controller] New received set: '{current_set_name}' valid in [{t_start:.2f}, {t_end:.2f}] at t_sim={time:.2f}s")
+                
+                self.current_loaded_set_name = current_set_name
+                self.latest_info = dict(info)
+                self.latest_vf = self.registry[current_set_name + '.vf']
+
+                HJ_NT = self.latest_vf.shape[0]
+                self.vf_time_grid = t_start + np.arange(HJ_NT) * self.HJ_TIMESTEP
 
     def _current_set_idx(self) -> int:
         """Return the set_idx of the currently active verification set, or -1 if unknown."""
@@ -217,7 +256,7 @@ class Controller:
                 return entry['set_idx']
         return -1
 
-    def _query_vf(self, t_pts, x_pts):
+    def _query_vf(self, t_pts, x_pts, vf=None, time_grid=None):
         """
         5D local linear interpolation on the value function ndarray.
         yaw (spatial dim 2) is treated as periodic on [-π, π].
@@ -226,16 +265,18 @@ class Controller:
         ----------
         t_pts : ndarray, shape (M,)
         x_pts : ndarray, shape (M, NX)
+        vf, time_grid : grid function to interpolate (default: latest safety set)
 
         Returns
         -------
         vals : ndarray, shape (M,)
         """
-        vf = self.latest_vf   # shape (NT, N0, N1, N2, N3)
+        if vf is None:
+            vf, time_grid = self.latest_vf, self.vf_time_grid   # shape (NT, N0, N1, N2, N3)
         M  = len(t_pts)
 
         # All 5 grids: [time, x, y, yaw, vel]
-        grids = [self.vf_time_grid, *self.spatial_grids]
+        grids = [time_grid, *self.spatial_grids]
         shape = vf.shape   # (NT, N0, N1, N2, N3)
 
         # Wrap yaw to [-π, π] before interpolation
@@ -380,25 +421,48 @@ class Controller:
 
     def _build_stage_params(self, time, x_pred):
         """
-        Build per-stage diagonal quadratic HJ surrogate parameters.
-
-        For each stage k:
-            t_k     = time + k * TIMESTEP
-            xbar_k  = x_pred[k]
-            a_k     = V(t_k, xbar_k)
-            g_k     = grad_x V(t_k, xbar_k)      (central finite differences)
-            hdiag_k = diag Hessian V(t_k, xbar_k) (second differences, clamped >= 0)
+        Build per-stage parameters: progress (TTR) and safety (V) surrogates.
 
         Returns
         -------
         params_all : ndarray, shape (N+1, NP)
             Each row is:
-                p_k = [xbar_k(4), a_k(1), g_k(4), hdiag_k(4)]   NP = 13
+                p_k = [xbar_k(4), a_k(1), g_k(4), hdiag_k(4), sa_k(1), sg_k(4), shdiag_k(4)]   NP = 22
         """
         S = self.N + 1
 
         x_pred = np.asarray(x_pred, dtype=float).reshape(S, NX)
         t_ks = time + np.arange(S) * self.TIMESTEP
+
+        a_all, g_all, hdiag_all = self._surrogate(t_ks, x_pred, self.ttr_vf, self.ttr_time_grid)
+        sa_all, sg_all, shdiag_all = self._surrogate(t_ks, x_pred, self.latest_vf, self.vf_time_grid)
+
+        params_all = np.zeros((S, NP), dtype=float)
+        params_all[:, get_param("xbar")]   = x_pred
+        params_all[:, get_param("a")]      = a_all[:, None]
+        params_all[:, get_param("g")]      = g_all
+        params_all[:, get_param("hdiag")]  = hdiag_all
+        params_all[:, get_param("sa")]     = sa_all[:, None]
+        params_all[:, get_param("sg")]     = sg_all
+        params_all[:, get_param("shdiag")] = shdiag_all
+
+        return params_all
+
+    def _surrogate(self, t_ks, x_pred, vf, time_grid):
+        """
+        Diagonal quadratic surrogate of a grid function F around each predicted state.
+
+        For each stage k:
+            xbar_k  = x_pred[k]
+            a_k     = F(t_k, xbar_k)
+            g_k     = grad_x F(t_k, xbar_k)      (central finite differences)
+            hdiag_k = diag Hessian F(t_k, xbar_k) (second differences, clamped >= 0)
+
+        Returns
+        -------
+        a_all : (S,), g_all : (S, NX), hdiag_all : (S, NX)
+        """
+        S = len(t_ks)
 
         # Finite-difference step per state dimension
         eps = np.array(self.HJ_GRID_DX) * 0.5
@@ -428,7 +492,7 @@ class Controller:
         all_x = np.vstack(pts_x)                # shape ((1 + 2*NX)*S, NX)
 
         # Single batched query
-        all_vals = self._query_vf(all_t, all_x)
+        all_vals = self._query_vf(all_t, all_x, vf, time_grid)
 
         # ------------------------------------------------------------
         # 2) Unpack values
@@ -463,17 +527,7 @@ class Controller:
         ])  # shape (S, NX)
         hdiag_all = np.maximum(hdiag_all, 0.0)   # PSD clamp
 
-        # ------------------------------------------------------------
-        # 5) Pack stage parameters
-        #    PARAM = [xbar(4), a(1), g(4), hdiag(4)]  => NP = 13
-        # ------------------------------------------------------------
-        params_all = np.zeros((S, NP), dtype=float)
-        params_all[:, get_param("xbar")]  = x_pred
-        params_all[:, get_param("a")]     = a_all[:, None]
-        params_all[:, get_param("g")]     = g_all
-        params_all[:, get_param("hdiag")] = hdiag_all
-
-        return params_all
+        return a_all, g_all, hdiag_all
 
     def run(self, t0, x0):
 
@@ -493,6 +547,12 @@ class Controller:
             tm.sleep(0.1)
 
         hj_horizon = self.config['verifier']['horizon']
+
+        # Time-to-reach map (published by the verifier before the first set) is
+        # time-invariant: two identical time slices let _query_vf interpolate it.
+        ttr = np.asarray(self.registry['progress.ttr'])
+        self.ttr_vf = np.stack([ttr, ttr])
+        self.ttr_time_grid = np.array([0.0, hj_horizon])
         number_of_steps = int(hj_horizon / self.TIMESTEP)
 
         for k in tqdm(range(number_of_steps), desc="Controller loop"):
