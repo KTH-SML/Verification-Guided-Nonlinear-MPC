@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
 from matplotlib.animation import FuncAnimation, PillowWriter
 import time as tm
 import os
@@ -25,6 +26,9 @@ class Animation:
         self.HJ_GRID_STP = [axis['points'] for axis in self.config['verifier']['axes'] if axis['name'] != 't']
 
         self.OBSTACLES = self.config['obstacles']
+        # Whole map extent (the value functions only cover the global window)
+        self.MAP_X = (self.config['X0'], self.config['X0'] + self.config['XW'])
+        self.MAP_Y = (self.config['Y0'], self.config['Y0'] + self.config['YW'])
         self.DYN_OBS = self.config['dynamic_obstacle']
         self.T_PRED = self.config['verifier']['t_prediction']
 
@@ -51,7 +55,9 @@ class Animation:
     def _hj_axes(self):
         x_grid = np.linspace(self.HJ_GRID_MIN[0], self.HJ_GRID_MAX[0], self.HJ_GRID_STP[0])
         y_grid = np.linspace(self.HJ_GRID_MIN[1], self.HJ_GRID_MAX[1], self.HJ_GRID_STP[1])
-        yaw_grid = np.linspace(self.HJ_GRID_MIN[2], self.HJ_GRID_MAX[2], self.HJ_GRID_STP[2])
+        # periodic yaw on the hj_reachability grid: N nodes at -pi + k*2pi/N, +pi excluded
+        yaw_grid = self.HJ_GRID_MIN[2] + np.arange(self.HJ_GRID_STP[2]) * \
+            (self.HJ_GRID_MAX[2] - self.HJ_GRID_MIN[2]) / self.HJ_GRID_STP[2]
         vel_grid = np.linspace(self.HJ_GRID_MIN[3], self.HJ_GRID_MAX[3], self.HJ_GRID_STP[3])
         return x_grid, y_grid, yaw_grid, vel_grid
 
@@ -71,6 +77,7 @@ class Animation:
         save_name=None,
         obstacles=None,
         interval_ms=100,
+        global_timeline=None,
     ):
         """
         Animate:
@@ -102,6 +109,9 @@ class Animation:
             List of rectangles (ox, oy, ow, oh)
         interval_ms : int
             Animation frame interval in ms
+        global_timeline : list or None
+            One entry per global window ({window, target, sim_time_end, ...}),
+            drawn on the map panel from the moment it became available.
         """
         real_path = np.asarray(real_path, dtype=float)
         pred_path = [np.asarray(p, dtype=float) for p in pred_path]
@@ -118,24 +128,35 @@ class Animation:
         x_grid, y_grid, yaw_grid, vel_grid = self._hj_axes()
         xg, yg = np.meshgrid(x_grid, y_grid, indexing="ij")
  
+        # matches the 3-period extension [raw, raw, raw] of the value functions
         yaw_grid_full = np.concatenate([
-            yaw_grid[:-1] - 2 * np.pi,
+            yaw_grid - 2 * np.pi,
             yaw_grid,
-            yaw_grid[1:] + 2 * np.pi,
+            yaw_grid + 2 * np.pi,
         ])
  
+        def _window_xy(entry):
+            """x, y grids of the set in `entry`: it lives on its global window."""
+            win = entry.get('window')
+            if win is None:
+                return x_grid, y_grid
+            (wx0, wx1), (wy0, wy1) = win
+            return (np.linspace(wx0, wx1, self.HJ_GRID_STP[0]),
+                    np.linspace(wy0, wy1, self.HJ_GRID_STP[1]))
+
         current_set_idx = used_sets[0]
         _entry = verifier_timeline[current_set_idx]
+        x_grid, y_grid = _window_xy(_entry)
         vf = np.load(_entry['path'])
         raw = vf
-        vf = np.concatenate([raw, raw[:,:,:,1:], raw[:,:,:,1:]], axis=3)
+        vf = np.concatenate([raw, raw, raw], axis=3)   # periodic yaw
         t0_vf = _entry['interval'][0]
         vf_time_grid = t0_vf + np.arange(vf.shape[0]) * self.HJ_TIMESTEP
  
         yaw_min, yaw_max = self.HJ_GRID_MIN[2] - 2 * np.pi, self.HJ_GRID_MAX[2] + 2 * np.pi
         vel_min, vel_max = self.HJ_GRID_MIN[3], self.HJ_GRID_MAX[3]
-        x_min, x_max = self.HJ_GRID_MIN[0], self.HJ_GRID_MAX[0]
-        y_min, y_max = self.HJ_GRID_MIN[1], self.HJ_GRID_MAX[1]
+        x_min, x_max = x_grid[0], x_grid[-1]
+        y_min, y_max = y_grid[0], y_grid[-1]
  
         # finite-difference step sizes (half a grid cell)
         eps_x = (x_grid[1]   - x_grid[0])   * 0.5
@@ -147,13 +168,14 @@ class Animation:
             (vel_grid[1] - vel_grid[0]) * 0.5,
         ])
  
-        # layout: 2 rows × 4 cols (top), full-width cost (bottom)
-        fig = plt.figure(figsize=(26, 12))
-        ax1 = fig.add_subplot(2, 4, 1)   # raw XY
-        ax5 = fig.add_subplot(2, 4, 2)   # local zoom + -∇V arrows
-        ax2 = fig.add_subplot(2, 4, 3)   # gradient slope per stage
-        ax3 = fig.add_subplot(2, 4, 4)   # yaw-vel
-        ax4 = fig.add_subplot(2, 1, 2)   # cost over time
+        # layout: full-width map (top), three panels (middle), full-width cost (bottom)
+        fig = plt.figure(figsize=(22, 17))
+        gs = fig.add_gridspec(3, 3, height_ratios=[1.2, 1.0, 0.7])
+        ax1 = fig.add_subplot(gs[0, :])   # whole map + global window + XY value function
+        ax5 = fig.add_subplot(gs[1, 0])   # local zoom + -∇V arrows
+        ax2 = fig.add_subplot(gs[1, 1])   # gradient slope per stage
+        ax3 = fig.add_subplot(gs[1, 2])   # yaw-vel
+        ax4 = fig.add_subplot(gs[2, :])   # cost over time
  
         # colorbar holder for ax2 — created once, never recreated
         _cbar_ax2 = None
@@ -191,6 +213,27 @@ class Animation:
                     )
                 )
  
+        # ------------------------------------------------------------------
+        # Helper: global window active at time t (the latest one available by t)
+        # ------------------------------------------------------------------
+        def _draw_global_window(ax, t):
+            if not global_timeline:
+                return
+            active = [g for g in global_timeline if g['sim_time_end'] <= t + 1e-9]
+            g = active[-1] if active else global_timeline[0]
+            (wx0, wx1), (wy0, wy1) = g['window']
+            ax.add_patch(plt.Rectangle(
+                (wx0, wy0), wx1 - wx0, wy1 - wy0,
+                fill=False, edgecolor="yellow", linestyle="--", linewidth=2.0,
+                zorder=8, label=f"global window v{g['version']}",
+            ))
+            tx, ty, tw, th = g['target']
+            ax.add_patch(plt.Rectangle(
+                (tx, ty), tw, th,
+                facecolor="lime", edgecolor="lime", alpha=0.35, linewidth=1.5,
+                zorder=8, label="goal" if g['target_is_goal'] else "global target",
+            ))
+
         # ------------------------------------------------------------------
         # Helper: heading arrow
         # ------------------------------------------------------------------
@@ -297,8 +340,67 @@ class Animation:
         # ------------------------------------------------------------------
         # Panel 1: raw XY + real path + prediction + -∇V arrows
         # ------------------------------------------------------------------
+        global_xy_cache = {}
+
+        def _draw_global_zero_level(ax, t):
+            """Zero level of the global set the current local set was derived from, at time t
+            (min over yaw, vel): the local set is contained in it."""
+            version = verifier_timeline[current_set_idx].get('global_version')
+            g = next((g for g in (global_timeline or []) if g['version'] == version), None)
+            if g is None or 'xy_path' not in g:
+                return
+            if version not in global_xy_cache:
+                global_xy_cache[version] = np.load(g['xy_path'])
+            Zg_all = global_xy_cache[version]
+            ig = int(np.clip(round((t - g['t0']) / self.HJ_TIMESTEP), 0, Zg_all.shape[0] - 1))
+            Zg = Zg_all[ig]
+            if not (Zg.min() < 0 < Zg.max()):
+                return
+            gx, gy = _window_xy(g)
+            outline = [pe.withStroke(linewidth=3.0, foreground="black")]
+            cs = ax.contour(gx, gy, Zg.T, levels=[0.0], colors="white",
+                            linestyles="--", linewidths=1.5, zorder=5)
+            cs.set(path_effects=outline)
+            ax.plot([], [], color="white", linestyle="--", linewidth=1.5,
+                    path_effects=outline, label=f"global V=0 (v{version})")
+
+        def _current_crop():
+            """PDE box of the local set in use: [(lo, hi)] for x, y, yaw, vel, or None."""
+            entry = verifier_timeline[current_set_idx]
+            return entry.get('crop'), entry.get('crop_pct')
+
+        def _draw_crop_box_xy(ax):
+            crop, pct = _current_crop()
+            if not crop:
+                return
+            (bx0, bx1), (by0, by1) = crop[0], crop[1]
+            ax.add_patch(plt.Rectangle(
+                (bx0, by0), bx1 - bx0, by1 - by0,
+                fill=False, edgecolor="magenta", linestyle="-.", linewidth=2.0, zorder=8,
+                label=f"PDE box ({pct:.0f}% cells)" if pct is not None else "PDE box",
+            ))
+
+        def _draw_crop_box_yv(ax):
+            crop, _ = _current_crop()
+            if not crop or len(crop) < 4:
+                return
+            (a0, a1), (v0, v1) = crop[2], crop[3]
+            # yaw is drawn on [-3pi, 3pi): repeat the box every 2pi (a cut yaw interval
+            # may extend past +-pi, the copies show its wrap-around)
+            for k, shift in enumerate((-2 * np.pi, 0.0, 2 * np.pi)):
+                ax.add_patch(plt.Rectangle(
+                    (a0 + shift, v0), a1 - a0, v1 - v0,
+                    fill=False, edgecolor="magenta", linestyle="-.", linewidth=2.0, zorder=8,
+                    label="PDE box" if k == 1 else None,
+                ))
+
         def _plot_xy_panel(ax, Z, title, t, x, y, yaw, pred, it_):
-            _plot_xy_base(ax, Z, (x_min, x_max), (y_min, y_max), t)
+            # whole map; the value function only covers the window of the current set
+            _plot_xy_base(ax, Z, self.MAP_X, self.MAP_Y, t)
+            _draw_global_window(ax, t)
+            _draw_global_zero_level(ax, t)
+            _draw_crop_box_xy(ax)
+            ax.plot([], [], color="red", linewidth=2.0, label="local V=0")
  
             ax.plot(
                 real_path[:frame_idx + 1, 1],
@@ -409,6 +511,8 @@ class Animation:
                 ax.contour(yaw_grid_full, vel_grid, Z.T,
                            levels=[0.0], colors="red", linewidths=2.0)
  
+            _draw_crop_box_yv(ax)
+
             ax.plot(yaw, vel, "ro", markersize=7, label="current")
  
             if pred is not None and len(pred) > 0:
@@ -471,15 +575,19 @@ class Animation:
         # ------------------------------------------------------------------
         def update(frame_idx_local):
             nonlocal frame_idx, current_set_idx, vf, vf_time_grid, t0_vf
+            nonlocal x_grid, y_grid, x_min, x_max, y_min, y_max
             frame_idx = frame_idx_local
 
             sid = used_sets[frame_idx] if frame_idx < len(used_sets) else used_sets[-1]
             if sid != current_set_idx:
                 current_set_idx = sid
                 _entry = verifier_timeline[sid]
+                x_grid, y_grid = _window_xy(_entry)
+                x_min, x_max = x_grid[0], x_grid[-1]
+                y_min, y_max = y_grid[0], y_grid[-1]
                 vf = np.load(_entry['path'])
                 raw = vf
-                vf = np.concatenate([raw, raw[:,:,:,1:], raw[:,:,:,1:]], axis=3)
+                vf = np.concatenate([raw, raw, raw], axis=3)   # periodic yaw
                 t0_vf = _entry['interval'][0]
                 vf_time_grid = t0_vf + np.arange(vf.shape[0]) * self.HJ_TIMESTEP
  
@@ -526,7 +634,7 @@ class Animation:
             # ----------------------------------------------------------------
             cost_arr = np.asarray([real_cost, interp_cost], dtype=float).T
             if len(cost_arr) > 0:
-                time_axis = np.arange(len(cost_arr)) * self.HJ_TIMESTEP
+                time_axis = np.arange(len(cost_arr)) * self.config['controller']['timestep']
                 ax4.plot(time_axis, cost_arr[:, 0],
                          color="steelblue", linewidth=1.5, label="Real Cost")
                 ax4.plot(time_axis, cost_arr[:, 1],
@@ -581,191 +689,141 @@ class Animation:
     
     def plot_timeline(self, save_path: str = "timeline.png") -> None:
         """
-        Plot the Verification Loop & MPC Loop Timeline using data from the registry.
+        Timeline of the global loop, the local loop and the MPC, on one simulation-time axis.
+
+        Lanes (top to bottom)
+            Global loop   compute   when each global window was computed
+                          active    which global window (and target) the system uses
+            Local loop    compute   when each local set was computed
+                          horizons  the time interval each local set covers
+            MPC           set used  which local set the controller was using
+        Dashed vertical lines mark the moment each new global window becomes available.
 
         Registry keys consumed
-        ----------------------
-        verifier.timeline : list of dicts, one per published set
-            {set_idx, interval, compute_start, compute_end, loop_end}
-            All times are absolute wall-clock (tm.time()).
-
-        controller.timeline : dict
-            {mpc_dt: float, used_sets: list[int]}
-            used_sets[k] is the set_idx active at MPC step k.
+            verifier.global_timeline : one entry per global window
+                {version, t0, window, target_is_goal, compute_start, compute_end, sim_time_end}
+            verifier.timeline : one entry per local set
+                {set_idx, interval, compute_start, compute_end, sim_start, sim_end, global_version}
+            controller.timeline : {mpc_dt, used_sets}   (used_sets[k]: set_idx at MPC step k)
+            mission.done (optional) : {time, ...}
         """
         import matplotlib.patches as mpatches
+        import matplotlib.colors as mcolors
 
+        gtl = self.registry.get('verifier.global_timeline', [])
         vtl = self.registry.get('verifier.timeline', [])
         ctl = self.registry.get('controller.timeline', {})
-
-        if not vtl:
-            print("[plot_timeline] No verifier.timeline in registry – nothing to plot.")
-            return
-        if not ctl:
-            print("[plot_timeline] No controller.timeline in registry – nothing to plot.")
+        done = self.registry.get('mission.done', None)
+        if not vtl or not ctl:
+            print("[plot_timeline] No verifier/controller timeline in registry - nothing to plot.")
             return
 
-        # ------------------------------------------------------------------
-        # Extract verifier data, normalise to t=0 at first compute_start
-        # ------------------------------------------------------------------
-        t_origin = vtl[0]['compute_start']
+        # Palette (validated categorical slots 1-3, light mode) and text/grid tokens
+        C_GLOBAL, C_LOCAL, C_MPC = "#2a78d6", "#eb6834", "#1baf7a"
+        INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#d9d8d4", "#fcfcfb"
 
-        n_sets             = len(vtl)
-        horizons           = [entry['interval']                         for entry in vtl]
-        set_compute        = [entry['compute_end'] - entry['compute_start'] for entry in vtl]
-        verify_start_times = [entry['compute_start'] - t_origin         for entry in vtl]
-        verify_compute_end = [entry['compute_end']   - t_origin         for entry in vtl]
-        verify_loop_end    = [entry['loop_end']      - t_origin         for entry in vtl]
+        def tint(hex_color, a=0.30):
+            # opaque light tint (color blended on the surface), so grid lines stay behind it
+            c, sfc = np.array(mcolors.to_rgb(hex_color)), np.array(mcolors.to_rgb(SURFACE))
+            return tuple(a * c + (1 - a) * sfc)
 
-        # ------------------------------------------------------------------
-        # Extract controller data
-        # ------------------------------------------------------------------
-        mpc_dt    = ctl['mpc_dt']
-        used_sets = np.asarray(ctl['used_sets'], dtype=int)
-        total_steps = len(used_sets)
-        total_time  = total_steps * mpc_dt
+        mpc_dt = ctl['mpc_dt']
+        used_sets = list(ctl['used_sets'])
+        t_end = len(used_sets) * mpc_dt
+        if done is not None:
+            t_end = min(t_end, done['time'])
+        t_max = max(t_end, max(e['interval'][1] for e in vtl))
 
-        # MPC starts as soon as the first set is ready
-        mpc_start = verify_compute_end[0]
+        # Lane layout (y grows upwards); the horizon lane has two staggered sub-rows
+        BAR_H, GAP = 0.6, 0.02 * t_max / 30   # GAP: 2px-like surface gap between adjacent fills
+        LANES = {
+            'g_comp': 7.0, 'g_act': 6.0,
+            'l_comp': 4.4, 'l_hor': (3.4, 2.7),
+            'mpc':    1.2,
+        }
+        MIN_W = 0.06   # minimum drawn width (s) so instantaneous computations stay visible
 
-        # MPC time ranges per set
-        mpc_segments = []
-        for sid in range(n_sets):
-            idxs = np.where(used_sets == sid)[0]
-            if len(idxs) == 0:
-                continue
-            t0_seg = mpc_start + idxs[0]  * mpc_dt
-            t1_seg = mpc_start + (idxs[-1] + 1) * mpc_dt
-            mpc_segments.append((sid, t0_seg, t1_seg))
+        fig_w = max(14.0, min(40.0, t_max * 0.45))
+        fig, ax = plt.subplots(figsize=(fig_w, 6.5))
+        fig.patch.set_facecolor(SURFACE)
+        ax.set_facecolor(SURFACE)
 
-        # ------------------------------------------------------------------
-        # Layout
-        # ------------------------------------------------------------------
-        COLORS = ["#4472C4", "#ED7D31", "#FFC000", "#70AD47"]
-        BAR_H          = 0.55
-        HORIZON_STRIDE = 0.65
-        TOP_PAD        = 2.0
-        BOT_PAD        = 2.2
-        EXTRA_PAD      = 1.2
-
-        horizon_block_h = n_sets * HORIZON_STRIDE
-        total_h         = TOP_PAD + horizon_block_h + BOT_PAD + 2 * EXTRA_PAD
-
-        ROW_MPC    = EXTRA_PAD
-        ROW_LABEL  = ROW_MPC   + BOT_PAD + (horizon_block_h / 2)
-        ROW_VERIFY = ROW_LABEL + (horizon_block_h / 2) + TOP_PAD
-
-        horizon_y_offsets = [
-            i * (-HORIZON_STRIDE) + (horizon_block_h - HORIZON_STRIDE) / 2
-            for i in range(n_sets)
-        ]
-
-        x_max_plot = max(verify_loop_end[-1], total_time + mpc_start) + 1
-        fig_w = max(18, int(x_max_plot * 0.5))
-        fig, ax = plt.subplots(figsize=(fig_w, total_h))
-        ax.set_xlim(-0.5, x_max_plot)
-        ax.set_ylim(EXTRA_PAD - 0.8, ROW_VERIFY + 1.2)
-        ax.axis("off")
-
-        # Row labels
-        ax.text(-0.3, ROW_VERIFY, "Verification\nLoop",
-                ha="right", va="center", fontsize=10, fontweight="bold")
-        ax.text(-0.3, ROW_MPC, "MPC Loop",
-                ha="right", va="center", fontsize=10, fontweight="bold")
-        ax.plot([-0.3, -0.05], [ROW_VERIFY, ROW_VERIFY], "k--", lw=1.5)
-        ax.plot([-0.3, -0.05], [ROW_MPC,    ROW_MPC   ], "k--", lw=1.5)
-
-        # Verification Loop bars
-        for k in range(n_sets):
-            t0  = verify_start_times[k]
-            t_c = verify_compute_end[k]
-            t1  = verify_loop_end[k]
-            color = COLORS[k % len(COLORS)]
-
+        def bar(t0, t1, y, color, alpha=1.0, h=BAR_H, label=None, edge=None):
+            w = max(t1 - t0, MIN_W)
             ax.add_patch(mpatches.FancyBboxPatch(
-                (t0, ROW_VERIFY - BAR_H / 2), set_compute[k], BAR_H,
-                boxstyle="round,pad=0.05", linewidth=1.2,
-                edgecolor="white", facecolor=color,
-            ))
-            ax.text(t0 + set_compute[k] / 2, ROW_VERIFY,
-                    f"Compute\n{set_compute[k]:.1f}s",
-                    ha="center", va="center", fontsize=7.5, color="white", fontweight="bold")
+                (t0 + GAP / 2, y - h / 2), max(w - GAP, MIN_W), h,
+                boxstyle="round,pad=0,rounding_size=0.04", linewidth=1.0 if edge else 0,
+                edgecolor=edge or "none", facecolor=color, alpha=alpha, zorder=3))
+            if label is not None and w > 0.03 * t_max:
+                ax.text(t0 + w / 2, y, label, ha="center", va="center",
+                        fontsize=7.5, color=INK, zorder=4, clip_on=True)
 
-            sleep_dur = t1 - t_c
-            if sleep_dur > 0.05:
-                ax.add_patch(mpatches.FancyBboxPatch(
-                    (t_c, ROW_VERIFY - BAR_H / 2), sleep_dur, BAR_H,
-                    boxstyle="round,pad=0.05", linewidth=1.2,
-                    edgecolor="white", facecolor="#1a1a1a",
-                ))
-                ax.text(t_c + sleep_dur / 2, ROW_VERIFY, "sleep",
-                        ha="center", va="center", fontsize=7.5, color="white")
+        # --- Global loop -------------------------------------------------
+        for k, g in enumerate(gtl):
+            bar(g['t0'], g['sim_time_end'], LANES['g_comp'], C_GLOBAL, label=f"v{g['version']}")
+            t_on = g['sim_time_end']
+            t_off = gtl[k + 1]['sim_time_end'] if k + 1 < len(gtl) else t_end
+            (x0, x1), _ = g['window']
+            tgt = "GOAL" if g['target_is_goal'] else "band"
+            bar(t_on, t_off, LANES['g_act'], tint(C_GLOBAL), edge=C_GLOBAL,
+                label=f"v{g['version']}  x∈[{x0:.1f}, {x1:.1f}]  → {tgt}")
+            # new global window available: dashed line across all lanes
+            ax.axvline(t_on, color=INK2, lw=0.8, ls=(0, (4, 3)), zorder=1)
 
-        # Horizon bars (middle)
-        for k, (h0, h1) in enumerate(horizons):
-            color  = COLORS[k % len(COLORS)]
-            y_base = ROW_LABEL + horizon_y_offsets[k]
-            abs_h0 = mpc_start + h0
-            abs_h1 = mpc_start + h1
-            ax.add_patch(mpatches.FancyBboxPatch(
-                (abs_h0, y_base - 0.22), abs_h1 - abs_h0, 0.44,
-                boxstyle="round,pad=0.03", linewidth=1,
-                edgecolor="white", facecolor=color, alpha=0.92,
-            ))
-            label = (f"verification set for {h0:.0f}s to {h1:.0f}s"
-                     if h1 - h0 > 1 else f"set to {h1:.0f}s")
-            ax.text((abs_h0 + abs_h1) / 2, y_base, label,
-                    ha="center", va="center", fontsize=8, color="white", fontweight="bold")
+        # --- Local loop --------------------------------------------------
+        for e in vtl:
+            k = e['set_idx']
+            s0 = e.get('sim_start', e['interval'][0])
+            s1 = e.get('sim_end', s0)
+            bar(s0, s1, LANES['l_comp'], C_LOCAL)
+            h0, h1 = e['interval']
+            bar(h0, h1, LANES['l_hor'][k % 2], tint(C_LOCAL), edge=C_LOCAL, h=0.5, label=f"s{k}")
 
-        # Arrows: verification → horizon
-        for k in range(n_sets):
-            t_pub  = verify_compute_end[k]
-            color  = COLORS[k % len(COLORS)]
-            y_base = ROW_LABEL + horizon_y_offsets[k]
-            ax.annotate("", xy=(t_pub, y_base + 0.22),
-                        xytext=(t_pub, ROW_VERIFY - BAR_H / 2 - 0.05),
-                        arrowprops=dict(arrowstyle="-|>", color=color, lw=1.5))
+        # --- MPC: consecutive steps with the same set -> one segment ----
+        seg_start = 0
+        for k in range(1, len(used_sets) + 1):
+            if k == len(used_sets) or used_sets[k] != used_sets[seg_start]:
+                sid = used_sets[seg_start]
+                bar(seg_start * mpc_dt, min(k * mpc_dt, t_end), LANES['mpc'], C_MPC,
+                    label=f"s{sid}" if sid >= 0 else "-")
+                seg_start = k
 
-        # Arrows: horizon → MPC
-        for k in range(n_sets):
-            t_pub  = verify_compute_end[k]
-            y_base = ROW_LABEL + horizon_y_offsets[k]
-            ax.annotate("", xy=(t_pub, ROW_MPC + BAR_H / 2 + 0.05),
-                        xytext=(t_pub, y_base - 0.22),
-                        arrowprops=dict(arrowstyle="-|>", color="black", lw=1.5))
+        if done is not None:
+            ax.axvline(done['time'], color=INK, lw=1.4, zorder=2)
+            ax.text(done['time'], 7.75, " goal reached", ha="left", va="center", fontsize=8, color=INK)
 
-        # MPC Loop bars
-        for sid, t0_seg, t1_seg in mpc_segments:
-            color = COLORS[sid % len(COLORS)]
-            ax.add_patch(mpatches.FancyBboxPatch(
-                (t0_seg, ROW_MPC - BAR_H / 2), t1_seg - t0_seg, BAR_H,
-                boxstyle="round,pad=0.05", linewidth=1.2,
-                edgecolor="white", facecolor=color,
-            ))
-            ax.text((t0_seg + t1_seg) / 2, ROW_MPC, "MPC LOOP",
-                    ha="center", va="center", fontsize=9, color="white", fontweight="bold")
+        # --- Axes, lane labels, summary ----------------------------------
+        ax.set_xlim(0, t_max)
+        ax.set_ylim(0.4, 8.0)
+        ax.set_yticks([LANES['g_comp'], LANES['g_act'], LANES['l_comp'],
+                       sum(LANES['l_hor']) / 2, LANES['mpc']])
+        ax.set_yticklabels(["Global loop · compute", "Global loop · active window",
+                            "Local loop · compute", "Local loop · set horizons",
+                            "MPC · set in use"], fontsize=9, color=INK)
+        for sep in (5.2, 2.0):   # separate global / local / MPC groups
+            ax.axhline(sep, color=GRID, lw=1.0, zorder=0)
+        tick = 1.0 if t_max <= 20 else 2.0 if t_max <= 40 else 5.0
+        ax.set_xticks(np.arange(0, t_max + 1e-9, tick))
+        ax.grid(axis='x', color=GRID, lw=0.6, zorder=0)
+        ax.tick_params(axis='x', colors=INK2, labelsize=8)
+        ax.tick_params(axis='y', length=0)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.spines["bottom"].set_color(GRID)
+        ax.set_xlabel("simulation time (s)", color=INK2, fontsize=9)
 
-        # Time axis
-        ax_time = ax.inset_axes([0, -0.08, 1, 0.06])
-        ax_time.set_xlim(ax.get_xlim())
-        ax_time.set_ylim(0, 1)
-        ax_time.axis("off")
+        def stats(entries, a, b):
+            d = [x[b] - x[a] for x in entries]
+            return f"mean {np.mean(d):.2f} s, max {np.max(d):.2f} s" if d else "n/a"
+        summary = (f"{len(gtl)} global windows (compute {stats(gtl, 'compute_start', 'compute_end')})   ·   "
+                   f"{len(vtl)} local sets (compute {stats(vtl, 'compute_start', 'compute_end')})")
+        ax.set_title("Global loop, local loop and MPC timeline", loc="left",
+                     fontsize=12, fontweight="bold", color=INK, pad=22)
+        ax.text(0, 1.02, summary + "   ·   compute times are wall-clock",
+                transform=ax.transAxes, fontsize=8.5, color=INK2, va="bottom")
 
-        x_min_ax, x_max_ax = ax.get_xlim()
-        tick_step = 5.0 if (x_max_ax - x_min_ax) > 30 else 1.0
-        ticks = np.arange(0, x_max_ax + tick_step, tick_step)
-        for t in ticks:
-            ax_time.axvline(t, color="gray", lw=0.5, ymin=0, ymax=0.4)
-            rel_t = t - mpc_start
-            if rel_t >= 0:
-                ax_time.text(t, -0.2, f"{rel_t:.0f}",
-                             ha="center", va="top", fontsize=8, color="gray")
-            ax.axvline(t, color="gray", lw=0.4, ls="--", alpha=0.4)
-
-        plt.suptitle("Verification Loop & MPC Loop Timeline",
-                     fontsize=12, fontweight="bold", y=1.01)
         plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=SURFACE)
         print(f"[plot_timeline] Saved to {save_path}")
         plt.close(fig)
 
@@ -793,6 +851,7 @@ class Animation:
             save_name="vf_debug",
             obstacles=self.OBSTACLES,
             interval_ms=100,
+            global_timeline=self.registry.get('verifier.global_timeline', []),
         )
 
         self.plot_timeline(save_path="timeline.png")

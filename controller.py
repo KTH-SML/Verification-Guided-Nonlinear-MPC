@@ -83,12 +83,19 @@ class Controller:
         self.HJ_GRID_MAX = [axis['bounds'][1] for axis in self.config['verifier']['axes'] if axis['name'] != 't']
         self.HJ_GRID_STP = [axis['points'] for axis in self.config['verifier']['axes'] if axis['name'] != 't']
         self.HJ_GRID_DX = [(self.HJ_GRID_MAX[i] - self.HJ_GRID_MIN[i]) / (self.HJ_GRID_STP[i] - 1) for i in range(4)]
+        # yaw is periodic on the hj_reachability grid: N nodes at -pi + k*2pi/N, +pi excluded
+        self.HJ_GRID_DX[2] = (self.HJ_GRID_MAX[2] - self.HJ_GRID_MIN[2]) / self.HJ_GRID_STP[2]
 
-        # Precompute spatial grids for direct indexing
+        # Spatial grids for direct indexing. x, y follow the global window the value
+        # function was computed on (see _window_grids); these are the config defaults.
         self.spatial_grids = [
             np.linspace(self.HJ_GRID_MIN[i], self.HJ_GRID_MAX[i], self.HJ_GRID_STP[i])
             for i in range(NX)
         ]
+        self.spatial_grids[2] = self.HJ_GRID_MIN[2] + np.arange(self.HJ_GRID_STP[2]) * self.HJ_GRID_DX[2]
+        self.vf_grids = self.spatial_grids     # grids of the current safety set
+        self.ttr_grids = self.spatial_grids    # grids of the current progress map
+        self.ttr_version = None
 
         self.solver = self._init_acados_solver()
         self._sol = {
@@ -222,11 +229,60 @@ class Controller:
 
         return ocp
 
+    def _window_grids(self, window):
+        """Spatial grids (x, y, yaw, vel) of a value function computed on `window`
+        = ((x_lo, x_hi), (y_lo, y_hi)); yaw and vel never move."""
+        if window is None:
+            return self.spatial_grids
+        (x_lo, x_hi), (y_lo, y_hi) = window
+        return [
+            np.linspace(x_lo, x_hi, self.HJ_GRID_STP[0]),
+            np.linspace(y_lo, y_hi, self.HJ_GRID_STP[1]),
+            *self.spatial_grids[2:],
+        ]
+
+    def update_progress_map(self, version=None):
+        """
+        Load the time-to-reach map of global window `version` (default: the latest one),
+        if it is not the one in use.
+
+        The cost (TTR) and the safety constraint (local V) must refer to the same global
+        problem: the local set is computed towards the target of the global window it was
+        derived from, so the progress map is switched together with the local set
+        (see update_current_valuefunc), not as soon as a new global window is published.
+        """
+        pinfo = self.registry.get('progress.info', None)
+        if pinfo is None:
+            return
+        if version is None:
+            version = pinfo['version']
+        if version == self.ttr_version:
+            return
+        ttr = self.registry.get(f"progress.ttr.{version}", None)
+        if ttr is None:
+            # map already dropped by the verifier: fall back to the latest one
+            print(f"[Controller] Progress map v{version} not available, using v{pinfo['version']}")
+            version = pinfo['version']
+            if version == self.ttr_version:
+                return
+            ttr = self.registry[f"progress.ttr.{version}"]
+        ttr = np.asarray(ttr)
+        # Time-invariant map: two identical time slices let _query_vf interpolate it.
+        self.ttr_vf = np.stack([ttr, ttr])
+        self.ttr_time_grid = np.array([0.0, self.config['verifier']['horizon']])
+        # the window of every version is recorded in the global timeline
+        window = next((g['window'] for g in self.registry.get('verifier.global_timeline', [])
+                       if g['version'] == version), pinfo['window'])
+        self.ttr_grids = self._window_grids(window)
+        self.ttr_version = version
+        (x_lo, x_hi), _ = window
+        print(f"[Controller] New progress map v{self.ttr_version}: window x = [{x_lo:.2f}, {x_hi:.2f}]")
+
     def update_current_valuefunc(self, time, state):
 
         self.registry['time'] = time
         self.registry['state'] = state
-        
+
         info = self.registry.get('latest.info', None)
         if info is None:
             return
@@ -238,15 +294,23 @@ class Controller:
             self.current_loaded_set_name = None
 
         if current_set_name != self.current_loaded_set_name:
-            if t_start <= time <= t_end:
-                print(f"[Controller] New received set: '{current_set_name}' valid in [{t_start:.2f}, {t_end:.2f}] at t_sim={time:.2f}s")
-                
+            # latest.info always holds the most recent set: load it as soon as its window
+            # has started, even if it already expired (published late). Past t_end it is
+            # queried at its last slice, which is still newer than the set in use.
+            if t_start <= time:
+                late = f" (already expired by {time - t_end:.2f}s)" if time > t_end else ""
+                print(f"[Controller] New received set: '{current_set_name}' valid in [{t_start:.2f}, {t_end:.2f}] at t_sim={time:.2f}s{late}")
+
                 self.current_loaded_set_name = current_set_name
                 self.latest_info = dict(info)
                 self.latest_vf = self.registry[current_set_name + '.vf']
+                self.vf_grids = self._window_grids(info.get('window'))
 
                 HJ_NT = self.latest_vf.shape[0]
                 self.vf_time_grid = t_start + np.arange(HJ_NT) * self.HJ_TIMESTEP
+
+                # progress map of the same global window the local set was derived from
+                self.update_progress_map(info.get('global_version'))
 
     def _current_set_idx(self) -> int:
         """Return the set_idx of the currently active verification set, or -1 if unknown."""
@@ -256,7 +320,7 @@ class Controller:
                 return entry['set_idx']
         return -1
 
-    def _query_vf(self, t_pts, x_pts, vf=None, time_grid=None):
+    def _query_vf(self, t_pts, x_pts, vf=None, time_grid=None, grids=None):
         """
         5D local linear interpolation on the value function ndarray.
         yaw (spatial dim 2) is treated as periodic on [-π, π].
@@ -266,6 +330,7 @@ class Controller:
         t_pts : ndarray, shape (M,)
         x_pts : ndarray, shape (M, NX)
         vf, time_grid : grid function to interpolate (default: latest safety set)
+        grids : its spatial grids [x, y, yaw, vel] (default: those of the latest safety set)
 
         Returns
         -------
@@ -273,10 +338,11 @@ class Controller:
         """
         if vf is None:
             vf, time_grid = self.latest_vf, self.vf_time_grid   # shape (NT, N0, N1, N2, N3)
+            grids = self.vf_grids
         M  = len(t_pts)
 
         # All 5 grids: [time, x, y, yaw, vel]
-        grids = [time_grid, *self.spatial_grids]
+        grids = [time_grid, *(self.spatial_grids if grids is None else grids)]
         shape = vf.shape   # (NT, N0, N1, N2, N3)
 
         # Wrap yaw to [-π, π] before interpolation
@@ -292,15 +358,21 @@ class Controller:
         for d in range(5):
             g  = grids[d]
             dx = g[1] - g[0]
-            i0 = np.floor((all_pts[:, d] - g[0]) / dx).astype(int)
-            i0 = np.clip(i0, 0, len(g) - 2)
-            alpha = np.clip((all_pts[:, d] - g[i0]) / dx, 0.0, 1.0)
 
-            if d == 3:  # yaw: periodic — right neighbor wraps to index 0 at boundary
-                i1 = np.where(i0 == len(g) - 2,
-                            np.zeros(M, dtype=int),   # wrap: last cell right → index 0
-                            i0 + 1)
+            if d == 3:
+                # yaw: periodic grid of N nodes (-pi + k*2pi/N, +pi excluded). Any yaw is
+                # wrapped onto it and the cell after the last node wraps to node 0. Only the
+                # first N entries of the (possibly 3-period extended) array are used.
+                N = len(g)
+                u = (all_pts[:, d] - g[0]) / dx
+                i0 = np.floor(u).astype(int)
+                alpha = u - i0
+                i0 = i0 % N
+                i1 = (i0 + 1) % N
             else:
+                i0 = np.floor((all_pts[:, d] - g[0]) / dx).astype(int)
+                i0 = np.clip(i0, 0, len(g) - 2)
+                alpha = np.clip((all_pts[:, d] - g[i0]) / dx, 0.0, 1.0)
                 i1 = i0 + 1
 
             idx0[d] = i0
@@ -434,8 +506,8 @@ class Controller:
         x_pred = np.asarray(x_pred, dtype=float).reshape(S, NX)
         t_ks = time + np.arange(S) * self.TIMESTEP
 
-        a_all, g_all, hdiag_all = self._surrogate(t_ks, x_pred, self.ttr_vf, self.ttr_time_grid)
-        sa_all, sg_all, shdiag_all = self._surrogate(t_ks, x_pred, self.latest_vf, self.vf_time_grid)
+        a_all, g_all, hdiag_all = self._surrogate(t_ks, x_pred, self.ttr_vf, self.ttr_time_grid, self.ttr_grids)
+        sa_all, sg_all, shdiag_all = self._surrogate(t_ks, x_pred, self.latest_vf, self.vf_time_grid, self.vf_grids)
 
         params_all = np.zeros((S, NP), dtype=float)
         params_all[:, get_param("xbar")]   = x_pred
@@ -448,7 +520,7 @@ class Controller:
 
         return params_all
 
-    def _surrogate(self, t_ks, x_pred, vf, time_grid):
+    def _surrogate(self, t_ks, x_pred, vf, time_grid, grids):
         """
         Diagonal quadratic surrogate of a grid function F around each predicted state.
 
@@ -492,7 +564,7 @@ class Controller:
         all_x = np.vstack(pts_x)                # shape ((1 + 2*NX)*S, NX)
 
         # Single batched query
-        all_vals = self._query_vf(all_t, all_x, vf, time_grid)
+        all_vals = self._query_vf(all_t, all_x, vf, time_grid, grids)
 
         # ------------------------------------------------------------
         # 2) Unpack values
@@ -546,14 +618,10 @@ class Controller:
                 return
             tm.sleep(0.1)
 
-        hj_horizon = self.config['verifier']['horizon']
-
-        # Time-to-reach map (published by the verifier before the first set) is
-        # time-invariant: two identical time slices let _query_vf interpolate it.
-        ttr = np.asarray(self.registry['progress.ttr'])
-        self.ttr_vf = np.stack([ttr, ttr])
-        self.ttr_time_grid = np.array([0.0, hj_horizon])
-        number_of_steps = int(hj_horizon / self.TIMESTEP)
+        # Time-to-reach map of the first global window (published before the first set);
+        # then switched by update_current_valuefunc together with the local set.
+        self.update_progress_map()
+        number_of_steps = int(self.config['mission_time'] / self.TIMESTEP)
 
         for k in tqdm(range(number_of_steps), desc="Controller loop"):
             start_time = tm.time()
@@ -608,7 +676,7 @@ class Controller:
             'vf_interp': VFInterp(
                 self.latest_vf,
                 self.vf_time_grid,
-                self.HJ_GRID_MIN,
+                [g[0] for g in self.vf_grids],
                 self.HJ_GRID_DX,
                 self.HJ_GRID_STP,
             )
@@ -641,11 +709,8 @@ class VFInterp:
         idxs = []
         for i in range(NX):
             if i == 2:
-                wrapped = (x_pts[:, i] - self.hj_grid_min[i]) % (
-                    self.hj_grid_min[i + 1] - self.hj_grid_min[i]
-                    if False else (self.hj_grid_dx[i] * (self.hj_grid_stp[i] - 1))
-                )
-                ix = np.clip(np.round(wrapped / self.hj_grid_dx[i]).astype(int), 0, self.hj_grid_stp[i] - 1)
+                # periodic yaw (hj grid: N nodes, +pi excluded): nearest node modulo N
+                ix = np.round((x_pts[:, i] - self.hj_grid_min[i]) / self.hj_grid_dx[i]).astype(int) % self.hj_grid_stp[i]
             else:
                 ix = np.clip(
                     np.round((x_pts[:, i] - self.hj_grid_min[i]) / self.hj_grid_dx[i]).astype(int),

@@ -136,7 +136,7 @@ class Runtime:
         config.run(self.registry)
 
         t0 = 0.0
-        x0 = [3.0, 0.5, pi/2, 0.0]
+        x0 = [0.5, 2.0, 0.0, 0.0]   # left end of the corridor, heading right
 
         self.registry['x0'] = x0
         self.registry['t0'] = t0
