@@ -1,5 +1,7 @@
 from tqdm import tqdm
 
+from log import log
+
 import os
 import shutil
 import time as tm
@@ -261,7 +263,8 @@ class Controller:
         ttr = self.registry.get(f"progress.ttr.{version}", None)
         if ttr is None:
             # map already dropped by the verifier: fall back to the latest one
-            print(f"[Controller] Progress map v{version} not available, using v{pinfo['version']}")
+            log("MPC", f"progress map v{version} not available, using v{pinfo['version']}",
+                self.registry.get('time'))
             version = pinfo['version']
             if version == self.ttr_version:
                 return
@@ -276,7 +279,8 @@ class Controller:
         self.ttr_grids = self._window_grids(window)
         self.ttr_version = version
         (x_lo, x_hi), _ = window
-        print(f"[Controller] New progress map v{self.ttr_version}: window x = [{x_lo:.2f}, {x_hi:.2f}]")
+        log("MPC", f"progress map -> global v{self.ttr_version} (window x [{x_lo:5.2f}, {x_hi:5.2f}])",
+            self.registry.get('time'))
 
     def update_current_valuefunc(self, time, state):
 
@@ -298,8 +302,9 @@ class Controller:
             # has started, even if it already expired (published late). Past t_end it is
             # queried at its last slice, which is still newer than the set in use.
             if t_start <= time:
-                late = f" (already expired by {time - t_end:.2f}s)" if time > t_end else ""
-                print(f"[Controller] New received set: '{current_set_name}' valid in [{t_start:.2f}, {t_end:.2f}] at t_sim={time:.2f}s{late}")
+                late = f", EXPIRED {time - t_end:.2f} s ago" if time > t_end else f", {t_end - time:4.2f} s left"
+                log("MPC", f"safety set -> s{current_set_name.removeprefix('set_')} "
+                           f"[{t_start:5.2f}, {t_end:5.2f}] s (global v{info.get('global_version')}){late}", time)
 
                 self.current_loaded_set_name = current_set_name
                 self.latest_info = dict(info)
@@ -444,13 +449,13 @@ class Controller:
         if status == 4:
             # Numerical failure: warm-start state is likely corrupted with NaN.
             # Reset solver and warm-start cache, then apply a safe zero-input fallback.
-            print("[acados] Warning: solver returned status 4 (NaN), resetting warm start.")
+            log("MPC", "WARNING: acados status 4 (NaN), warm start reset", self.registry.get('time'))
             self._sol['healthy'] = False
             self.solver.reset()
             return [0.0] * NU
         else:
             if status not in (0, 1):
-                print(f"[acados] Warning: solver returned status {status}")
+                log("MPC", f"WARNING: acados status {status}", self.registry.get('time'))
             # 6) Cache solution for warm-starting next time
             x_cached = np.array([self.solver.get(k, "x") for k in range(self.N + 1)])
             self._sol.update(
@@ -610,8 +615,10 @@ class Controller:
         real_cost   = []
         interp_cost = []
 
-        # Timeline: list of set_idx used at each MPC step (index k → used set)
+        # Timeline: set_idx of the safety set and global version of the progress (TTR) map
+        # used at each MPC step (index k -> step k)
         used_sets: list = []
+        used_ttr: list = []
 
         while self.registry.get("latest.info") is None:
             if self.stop_event.is_set():
@@ -636,9 +643,11 @@ class Controller:
 
             # Record which verification set was active this step
             used_sets.append(self._current_set_idx())
+            used_ttr.append(-1 if self.ttr_version is None else int(self.ttr_version))
             self.registry['controller.timeline'] = {
                 'mpc_dt':    self.TIMESTEP,
                 'used_sets': list(used_sets),
+                'used_ttr':  list(used_ttr),
             }
 
             pred_traj = self.get_optimal_states()

@@ -25,10 +25,21 @@ HJ_TIMESTEP = 0.2    # s
 HJ_HORIZON  = 7.0   # s, time length of each global window (receding horizon)
 HJ_PREDICTION = 2.0  # s
 HJ_DELAY      = 0.2   # s, how far in the future each local window starts (T_DELAY)
+HJ_LOCAL_PERIOD = 1.0  # s, fixed time between the starts of consecutive local windows (T_L)
+# Local schedule (simulation time): window k = [k*T_L, k*T_L + HJ_PREDICTION], computed
+# at k*T_L - HJ_DELAY. Requirements:
+#   local compute time <= HJ_DELAY        (set ready before its window starts)
+#   local compute time <= HJ_LOCAL_PERIOD (the schedule does not drift)
+#   HJ_LOCAL_PERIOD    <  HJ_PREDICTION   (consecutive local sets overlap)
 
-# Spatial crop of the local grid: the local set over [t_s, t_e] is contained in the
-# global zero sublevel set over the same interval, so the local PDE is solved only on
-# the bounding box of that set (recomputed at every local iteration).
+# Spatial crop of the local grid: the local PDE is solved only on a box of the window.
+#   'none'       : whole window (reference, no crop)
+#   'reach'      : box reachable from the current state in HJ_DELAY + HJ_PREDICTION
+#                  with worst-case speeds (fixed size, centred on the vehicle)
+#   'zero_level' : bounding box of the global zero sublevel set over the local window
+#                  (the local set is contained in it; size recomputed at every iteration)
+# Per-set statistics are written to results/crop_<method>.csv.
+HJ_CROP_METHOD = 'zero_level'
 HJ_CROP_AXES   = ('x', 'y', '*yaw', 'vel')   # axes to crop (names as in AXES)
 HJ_CROP_MARGIN = 2                            # extra cells per side (numerical boundary effects)
 
@@ -36,10 +47,16 @@ HJ_CROP_MARGIN = 2                            # extra cells per side (numerical 
 # re-solved on a WINDOW_W x WINDOW_H spatial window placed around the vehicle
 # (WINDOW_BACK metres behind it, the rest ahead). The target is a band of depth
 # GLOBAL_TARGET_DEPTH on the right edge of the window, or GOAL once it is inside.
-# Requirements:
-#   HJ_HORIZON >= GLOBAL_UPDATE + compute time + HJ_DELAY + HJ_PREDICTION
-#   MAX_VEL * (GLOBAL_UPDATE + compute time) < WINDOW_W - WINDOW_BACK
-GLOBAL_UPDATE       = 2.0          # s
+# Global schedule (simulation time): global j covers [j*T_U, j*T_U + HJ_HORIZON], is
+# computed from j*T_U - T_G on the state at that moment, and is used by the local
+# windows starting in [j*T_U, (j+1)*T_U). Requirements:
+#   global compute time <= T_G - HJ_DELAY   (ready before the first local set using it is computed)
+#   global compute time <= T_U              (the schedule does not drift)
+#   T_U + HJ_PREDICTION <= HJ_HORIZON       (every local window ends inside its global horizon)
+#   MAX_VEL * (T_G + T_U + HJ_PREDICTION) <= WINDOW_W - WINDOW_BACK  (worst case: the vehicle does
+#                                            not pass the target band before the next global is used)
+GLOBAL_UPDATE       = 2.0          # s, T_U: global j covers [j*T_U, j*T_U + HJ_HORIZON]
+GLOBAL_LEAD         = 1.0          # s, T_G: global j is computed from j*T_U - T_G (background thread)
 WINDOW_W, WINDOW_H  = 5.0, 4.0     # m
 WINDOW_BACK         = 1.5          # m
 GLOBAL_TARGET_DEPTH = 0.3          # m
@@ -144,11 +161,14 @@ def run(registry):
             horizon   = HJ_HORIZON,
             t_prediction = HJ_PREDICTION,
             t_delay      = HJ_DELAY,
+            local_period = HJ_LOCAL_PERIOD,
+            crop_method  = HJ_CROP_METHOD,
             crop_axes    = HJ_CROP_AXES,
             crop_margin  = HJ_CROP_MARGIN,
             axes         = AXES,
             # Receding global window
             global_update       = GLOBAL_UPDATE,
+            global_lead         = GLOBAL_LEAD,
             window_size         = (WINDOW_W, WINDOW_H),
             window_back         = WINDOW_BACK,
             global_target_depth = GLOBAL_TARGET_DEPTH,

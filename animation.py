@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from controller import Controller
 from obstacles import obstacle_rects
+from log import log
 
 class Animation:
 
@@ -214,12 +215,13 @@ class Animation:
                 )
  
         # ------------------------------------------------------------------
-        # Helper: global window active at time t (the latest one available by t)
+        # Helper: global window active at time t (the latest one that has started,
+        # i.e. t >= t0, and is available by t)
         # ------------------------------------------------------------------
         def _draw_global_window(ax, t):
             if not global_timeline:
                 return
-            active = [g for g in global_timeline if g['sim_time_end'] <= t + 1e-9]
+            active = [g for g in global_timeline if max(g['t0'], g['sim_time_end']) <= t + 1e-9]
             g = active[-1] if active else global_timeline[0]
             (wx0, wx1), (wy0, wy1) = g['window']
             ax.add_patch(plt.Rectangle(
@@ -694,9 +696,11 @@ class Animation:
         Lanes (top to bottom)
             Global loop   compute   when each global window was computed
                           active    which global window (and target) the system uses
+                          horizons  the time interval each global set covers, [t0, t0 + HJ_HORIZON]
             Local loop    compute   when each local set was computed
                           horizons  the time interval each local set covers
-            MPC           set used  which local set the controller was using
+            MPC           TTR map   which global window the progress (TTR) cost refers to
+                          set used  which local set the controller was using
         Dashed vertical lines mark the moment each new global window becomes available.
 
         Registry keys consumed
@@ -704,7 +708,8 @@ class Animation:
                 {version, t0, window, target_is_goal, compute_start, compute_end, sim_time_end}
             verifier.timeline : one entry per local set
                 {set_idx, interval, compute_start, compute_end, sim_start, sim_end, global_version}
-            controller.timeline : {mpc_dt, used_sets}   (used_sets[k]: set_idx at MPC step k)
+            controller.timeline : {mpc_dt, used_sets, used_ttr}
+                (used_sets[k]: set_idx, used_ttr[k]: global version of the TTR map at MPC step k)
             mission.done (optional) : {time, ...}
         """
         import matplotlib.patches as mpatches
@@ -715,7 +720,7 @@ class Animation:
         ctl = self.registry.get('controller.timeline', {})
         done = self.registry.get('mission.done', None)
         if not vtl or not ctl:
-            print("[plot_timeline] No verifier/controller timeline in registry - nothing to plot.")
+            log("Animation", "no verifier/controller timeline in the registry: timeline not plotted")
             return
 
         # Palette (validated categorical slots 1-3, light mode) and text/grid tokens
@@ -734,17 +739,33 @@ class Animation:
             t_end = min(t_end, done['time'])
         t_max = max(t_end, max(e['interval'][1] for e in vtl))
 
-        # Lane layout (y grows upwards); the horizon lane has two staggered sub-rows
+        H_GLOBAL = self.config['verifier']['horizon']
+
+        # Global horizons overlap by more than two at a time when HJ_HORIZON > 2 * the update
+        # period: each one goes on the first sub-row that is free at its start.
+        g_row, row_end = [], []
+        for g in gtl:
+            r = next((i for i, e in enumerate(row_end) if e <= g['t0'] + 1e-9), len(row_end))
+            if r == len(row_end):
+                row_end.append(0.0)
+            row_end[r] = g['t0'] + H_GLOBAL
+            g_row.append(r)
+        n_g_rows = max(len(row_end), 1)
+
+        # Lane layout (y grows upwards); the horizon lanes have staggered sub-rows
         BAR_H, GAP = 0.6, 0.02 * t_max / 30   # GAP: 2px-like surface gap between adjacent fills
+        ROW = 0.7                              # spacing of the horizon sub-rows
+        g_hor = tuple(5.9 + ROW * (n_g_rows - 1 - i) for i in range(n_g_rows))
         LANES = {
-            'g_comp': 7.0, 'g_act': 6.0,
+            'g_comp': g_hor[0] + 2.0, 'g_act': g_hor[0] + 1.0, 'g_hor': g_hor,
             'l_comp': 4.4, 'l_hor': (3.4, 2.7),
-            'mpc':    1.2,
+            'mpc_ttr': 1.35, 'mpc': 0.65,
         }
+        y_top = LANES['g_comp'] + 0.8
         MIN_W = 0.06   # minimum drawn width (s) so instantaneous computations stay visible
 
         fig_w = max(14.0, min(40.0, t_max * 0.45))
-        fig, ax = plt.subplots(figsize=(fig_w, 6.5))
+        fig, ax = plt.subplots(figsize=(fig_w, 6.5 + 0.55 * (y_top - 8.0)))
         fig.patch.set_facecolor(SURFACE)
         ax.set_facecolor(SURFACE)
 
@@ -760,14 +781,21 @@ class Animation:
 
         # --- Global loop -------------------------------------------------
         for k, g in enumerate(gtl):
-            bar(g['t0'], g['sim_time_end'], LANES['g_comp'], C_GLOBAL, label=f"v{g['version']}")
-            t_on = g['sim_time_end']
-            t_off = gtl[k + 1]['sim_time_end'] if k + 1 < len(gtl) else t_end
+            # computed in advance (background thread), used from its window start t0
+            bar(g.get('sim_time_start', g['t0']), g['sim_time_end'], LANES['g_comp'], C_GLOBAL,
+                label=f"v{g['version']}")
+            t_on = max(g['t0'], g['sim_time_end'])
+            t_off = max(gtl[k + 1]['t0'], gtl[k + 1]['sim_time_end']) if k + 1 < len(gtl) else t_end
             (x0, x1), _ = g['window']
             tgt = "GOAL" if g['target_is_goal'] else "band"
             bar(t_on, t_off, LANES['g_act'], tint(C_GLOBAL), edge=C_GLOBAL,
                 label=f"v{g['version']}  x∈[{x0:.1f}, {x1:.1f}]  → {tgt}")
-            # new global window available: dashed line across all lanes
+            # time interval covered by the global set (may extend past the plot: clipped)
+            h0, h1 = g['t0'], g['t0'] + H_GLOBAL
+            more = f"  → {h1:.1f} s" if h1 > t_max else ""
+            bar(h0, min(h1, t_max), LANES['g_hor'][g_row[k]], tint(C_GLOBAL), edge=C_GLOBAL, h=0.5,
+                label=f"v{g['version']}  [{h0:.1f}, {h1:.1f}] s" if not more else f"v{g['version']}{more}")
+            # global window starts being used by the local sets: dashed line across all lanes
             ax.axvline(t_on, color=INK2, lw=0.8, ls=(0, (4, 3)), zorder=1)
 
         # --- Local loop --------------------------------------------------
@@ -779,27 +807,42 @@ class Animation:
             h0, h1 = e['interval']
             bar(h0, h1, LANES['l_hor'][k % 2], tint(C_LOCAL), edge=C_LOCAL, h=0.5, label=f"s{k}")
 
-        # --- MPC: consecutive steps with the same set -> one segment ----
-        seg_start = 0
-        for k in range(1, len(used_sets) + 1):
-            if k == len(used_sets) or used_sets[k] != used_sets[seg_start]:
-                sid = used_sets[seg_start]
-                bar(seg_start * mpc_dt, min(k * mpc_dt, t_end), LANES['mpc'], C_MPC,
-                    label=f"s{sid}" if sid >= 0 else "-")
-                seg_start = k
+        # --- MPC: consecutive steps with the same set / map -> one segment
+        def segments(values):
+            seg_start = 0
+            for k in range(1, len(values) + 1):
+                if k == len(values) or values[k] != values[seg_start]:
+                    yield values[seg_start], seg_start * mpc_dt, min(k * mpc_dt, t_end)
+                    seg_start = k
+
+        for sid, a, b in segments(used_sets):
+            bar(a, b, LANES['mpc'], C_MPC, h=0.5, label=f"s{sid}" if sid >= 0 else "-")
+
+        # progress map: global version of the TTR cost, and the global of the set in use
+        # (they coincide by construction; a mismatch is drawn in red)
+        used_ttr = list(ctl.get('used_ttr', []))
+        set_gv = {e['set_idx']: e.get('global_version') for e in vtl}
+        for k, (v, a, b) in enumerate(segments(used_ttr)):
+            if v < 0:
+                continue
+            steps = range(int(round(a / mpc_dt)), int(round(b / mpc_dt)))
+            mismatch = any(set_gv.get(used_sets[i]) not in (None, v) for i in steps if i < len(used_sets))
+            bar(a, b, LANES['mpc_ttr'], tint(C_GLOBAL), edge="#d03b3b" if mismatch else C_GLOBAL, h=0.5,
+                label=f"TTR v{v}" + ("  ≠ set" if mismatch else ""))
 
         if done is not None:
             ax.axvline(done['time'], color=INK, lw=1.4, zorder=2)
-            ax.text(done['time'], 7.75, " goal reached", ha="left", va="center", fontsize=8, color=INK)
+            ax.text(done['time'], y_top - 0.25, " goal reached", ha="left", va="center", fontsize=8, color=INK)
 
         # --- Axes, lane labels, summary ----------------------------------
         ax.set_xlim(0, t_max)
-        ax.set_ylim(0.4, 8.0)
-        ax.set_yticks([LANES['g_comp'], LANES['g_act'], LANES['l_comp'],
-                       sum(LANES['l_hor']) / 2, LANES['mpc']])
+        ax.set_ylim(0.2, y_top)
+        ax.set_yticks([LANES['g_comp'], LANES['g_act'], float(np.mean(LANES['g_hor'])),
+                       LANES['l_comp'], sum(LANES['l_hor']) / 2, LANES['mpc_ttr'], LANES['mpc']])
         ax.set_yticklabels(["Global loop · compute", "Global loop · active window",
+                            "Global loop · set horizons",
                             "Local loop · compute", "Local loop · set horizons",
-                            "MPC · set in use"], fontsize=9, color=INK)
+                            "MPC · progress map (TTR)", "MPC · set in use"], fontsize=9, color=INK)
         for sep in (5.2, 2.0):   # separate global / local / MPC groups
             ax.axhline(sep, color=GRID, lw=1.0, zorder=0)
         tick = 1.0 if t_max <= 20 else 2.0 if t_max <= 40 else 5.0
@@ -815,8 +858,14 @@ class Animation:
         def stats(entries, a, b):
             d = [x[b] - x[a] for x in entries]
             return f"mean {np.mean(d):.2f} s, max {np.max(d):.2f} s" if d else "n/a"
+        # overlap of consecutive global horizons vs the time span of one local set
+        overlaps = [g['t0'] + H_GLOBAL - n['t0'] for g, n in zip(gtl, gtl[1:])]
+        local_span = self.config['verifier'].get('t_delay', 0.0) + self.T_PRED
+        overlap_txt = (f"min global overlap {min(overlaps):.2f} s (local set needs {local_span:.2f} s)"
+                       if overlaps else "")
         summary = (f"{len(gtl)} global windows (compute {stats(gtl, 'compute_start', 'compute_end')})   ·   "
-                   f"{len(vtl)} local sets (compute {stats(vtl, 'compute_start', 'compute_end')})")
+                   f"{len(vtl)} local sets (compute {stats(vtl, 'compute_start', 'compute_end')})"
+                   + (f"   ·   {overlap_txt}" if overlap_txt else ""))
         ax.set_title("Global loop, local loop and MPC timeline", loc="left",
                      fontsize=12, fontweight="bold", color=INK, pad=22)
         ax.text(0, 1.02, summary + "   ·   compute times are wall-clock",
@@ -824,7 +873,7 @@ class Animation:
 
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=SURFACE)
-        print(f"[plot_timeline] Saved to {save_path}")
+        log("Animation", f"timeline saved to {save_path}")
         plt.close(fig)
 
     def run(self):
