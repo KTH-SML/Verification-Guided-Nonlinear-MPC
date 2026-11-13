@@ -70,9 +70,11 @@ class Controller:
         self.safety_margin = self.config['controller']['safety_margin']
         self.safety_slack_l1 = self.config['controller']['safety_slack_l1']
         self.safety_slack_l2 = self.config['controller']['safety_slack_l2']
+        # 'state': V_l at the full state, 'min': min over (yaw, vel) (see config.SAFETY_V_MODE)
+        self.safety_v_mode = self.config['controller'].get('safety_v_mode', 'state')
 
         # Model parameters
-        self.L = 0.32   # Wheelbase length (m)
+        self.L = self.config['wheelbase']   # Wheelbase length (m)
         self.min_velocity = 0.0
         self.max_velocity = self.config['controller']['max_vel']
         self.min_acceleration = self.config['controller']['max_accel'] * -1
@@ -309,6 +311,11 @@ class Controller:
                 self.current_loaded_set_name = current_set_name
                 self.latest_info = dict(info)
                 self.latest_vf = self.registry[current_set_name + '.vf']
+                if self.safety_v_mode == 'min':
+                    # same as the TTR map: only depends on (t, x, y). Kept on the full
+                    # grid shape so the interpolation and the surrogate are unchanged.
+                    vf = np.asarray(self.latest_vf)
+                    self.latest_vf = vf.min(axis=(3, 4), keepdims=True) * np.ones_like(vf)
                 self.vf_grids = self._window_grids(info.get('window'))
 
                 HJ_NT = self.latest_vf.shape[0]

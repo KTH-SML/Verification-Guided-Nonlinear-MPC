@@ -56,7 +56,7 @@ class Controller:
         self.Qhj = self.config['controller']['qhj']
 
         # Model parameters
-        self.L = 0.32   # Wheelbase length (m)
+        self.L = self.config['wheelbase']   # Wheelbase length (m)
         self.min_velocity = 0.0
         self.max_velocity = self.config['controller']['max_vel']
         self.min_acceleration = self.config['controller']['max_accel'] * -1

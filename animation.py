@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
+import matplotlib.transforms as mtransforms
 from matplotlib.animation import FuncAnimation, PillowWriter
 import time as tm
 import os
@@ -30,7 +31,10 @@ class Animation:
         # Whole map extent (the value functions only cover the global window)
         self.MAP_X = (self.config['X0'], self.config['X0'] + self.config['XW'])
         self.MAP_Y = (self.config['Y0'], self.config['Y0'] + self.config['YW'])
-        self.DYN_OBS = self.config['dynamic_obstacle']
+        self.DYN_OBS = self.config['dynamic_obstacles']
+        self.VEHICLE = self.config.get('vehicle')
+        # Size of the drawn glyphs (arrows, zoom), relative to the 1:10 corridor
+        self.SCALE = self.config['wheelbase'] / 0.32
         self.T_PRED = self.config['verifier']['t_prediction']
 
     @staticmethod
@@ -182,6 +186,19 @@ class Animation:
         _cbar_ax2 = None
  
         # ------------------------------------------------------------------
+        # Helper: legend in a row under the panel, so it never covers the plot
+        # ------------------------------------------------------------------
+        def _legend_below(ax, ncol=3):
+            handles, labels = ax.get_legend_handles_labels()
+            if not handles:
+                return
+            # fixed offset in points (below tick labels and x label), whatever the panel height
+            below = mtransforms.offset_copy(ax.transAxes, fig=fig, y=-34, units="points")
+            ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.0),
+                      bbox_transform=below, ncol=min(ncol, len(handles)), fontsize=8,
+                      frameon=False)
+
+        # ------------------------------------------------------------------
         # Helper: draw obstacle rectangles
         # ------------------------------------------------------------------
         def _draw_obstacles_local(ax):
@@ -201,19 +218,22 @@ class Animation:
         # Helper: draw the moving obstacle at its position for time t
         # ------------------------------------------------------------------
         def _draw_dynamic_obstacle(ax, t):
-            for ox, oy, ow, oh in obstacle_rects(t, self.DYN_OBS):
-                ax.add_patch(
-                    plt.Rectangle(
-                        (ox, oy), ow, oh,
-                        linewidth=1.5,
-                        edgecolor="white",
-                        facecolor="crimson",
-                        alpha=0.7,
-                        zorder=7,
-                        label="dynamic obstacle",
+            first = True
+            for dyn in self.DYN_OBS:
+                for ox, oy, ow, oh in obstacle_rects(t, dyn):
+                    ax.add_patch(
+                        plt.Rectangle(
+                            (ox, oy), ow, oh,
+                            linewidth=1.5,
+                            edgecolor="white",
+                            facecolor="crimson",
+                            alpha=0.7,
+                            zorder=7,
+                            label="dynamic obstacle" if first else None,
+                        )
                     )
-                )
- 
+                    first = False
+
         # ------------------------------------------------------------------
         # Helper: global window active at time t (the latest one that has started,
         # i.e. t >= t0, and is available by t)
@@ -240,12 +260,13 @@ class Animation:
         # Helper: heading arrow
         # ------------------------------------------------------------------
         def _draw_heading_arrow(ax, x, y, yaw, length=0.25, color="white", lw=2.0):
-            dx = length * np.cos(yaw)
-            dy = length * np.sin(yaw)
+            s = self.SCALE
+            dx = length * s * np.cos(yaw)
+            dy = length * s * np.sin(yaw)
             ax.arrow(
                 x, y, dx, dy,
-                head_width=0.08,
-                head_length=0.10,
+                head_width=0.08 * s,
+                head_length=0.10 * s,
                 fc=color,
                 ec=color,
                 linewidth=lw,
@@ -296,8 +317,8 @@ class Animation:
                 mag = np.hypot(ngx, ngy)
                 if mag < 1e-8:
                     continue
-                dx = ngx / mag * scale
-                dy = ngy / mag * scale
+                dx = ngx / mag * scale * self.SCALE
+                dy = ngy / mag * scale * self.SCALE
                 ax.annotate(
                     "",
                     xy=(pk[0] + dx, pk[1] + dy),
@@ -423,7 +444,7 @@ class Animation:
             ax.set_xlabel("X-axis")
             ax.set_ylabel("Y-axis")
             ax.set_title(title)
-            ax.legend(loc="upper right", fontsize=8)
+            _legend_below(ax, ncol=6)
  
         # ------------------------------------------------------------------
         # Panel 2: gradient slope per stage
@@ -480,7 +501,7 @@ class Animation:
             ax.set_xlabel("MPC Stage  k")
             ax.set_ylabel("V value")
             ax.set_title(f"Gradient Slope per Stage  (V₀={V_true[0]:.3f})")
-            ax.legend(loc="upper right", fontsize=8)
+            _legend_below(ax)
             ax.grid(True, alpha=0.4)
  
             # colorbar: create only once
@@ -533,13 +554,13 @@ class Animation:
             ax.set_ylabel("Velocity")
             ax.set_title("Value Function (Theta vs V)")
             ax.grid(True)
-            ax.legend(loc="upper right", fontsize=8)
+            _legend_below(ax)
  
         # ------------------------------------------------------------------
         # Panel 5: local zoom + -∇V arrows
         # ------------------------------------------------------------------
         def _plot_local_panel(ax, Z, t, x, y, yaw, pred, it_):
-            window = 0.3
+            window = 0.3 * self.SCALE
             lx_min, lx_max = x - window, x + window
             ly_min, ly_max = y - window, y + window
  
@@ -559,7 +580,7 @@ class Animation:
             ax.set_xlabel("X")
             ax.set_ylabel("Y")
             ax.set_title(f"-∇V safe direction  (x={x:.2f}, y={y:.2f})")
-            ax.legend(loc="upper right", fontsize=8)
+            _legend_below(ax)
             ax.grid(True, alpha=0.3)
  
         # ------------------------------------------------------------------
@@ -653,7 +674,7 @@ class Animation:
                 ax4.set_xlabel("Time (s)")
                 ax4.set_ylabel("HJ Value V(x)")
                 ax4.set_title("Time vs HJ Cost  (V ≤ 0 = safe)")
-                ax4.legend(loc="upper right", fontsize=8)
+                _legend_below(ax4)
                 ax4.grid(True, alpha=0.4)
                 ax4.set_ylim(-2, 2)
  
@@ -694,10 +715,10 @@ class Animation:
         Timeline of the global loop, the local loop and the MPC, on one simulation-time axis.
 
         Lanes (top to bottom)
-            Global loop   compute   when each global window was computed
-                          active    which global window (and target) the system uses
-                          horizons  the time interval each global set covers, [t0, t0 + HJ_HORIZON]
-            Local loop    compute   when each local set was computed
+            Global loop   compute   when each global window was computed (labelled vN)
+                          horizons  the time interval each global set covers, [t0, t0 + HJ_HORIZON],
+                                    with its spatial window and target
+            Local loop    compute   when each local set was computed (labelled sN)
                           horizons  the time interval each local set covers
             MPC           TTR map   which global window the progress (TTR) cost refers to
                           set used  which local set the controller was using
@@ -757,7 +778,7 @@ class Animation:
         ROW = 0.7                              # spacing of the horizon sub-rows
         g_hor = tuple(5.9 + ROW * (n_g_rows - 1 - i) for i in range(n_g_rows))
         LANES = {
-            'g_comp': g_hor[0] + 2.0, 'g_act': g_hor[0] + 1.0, 'g_hor': g_hor,
+            'g_comp': g_hor[0] + 1.0, 'g_hor': g_hor,
             'l_comp': 4.4, 'l_hor': (3.4, 2.7),
             'mpc_ttr': 1.35, 'mpc': 0.65,
         }
@@ -769,32 +790,43 @@ class Animation:
         fig.patch.set_facecolor(SURFACE)
         ax.set_facecolor(SURFACE)
 
-        def bar(t0, t1, y, color, alpha=1.0, h=BAR_H, label=None, edge=None):
+        def bar(t0, t1, y, color, alpha=1.0, h=BAR_H, label=None, edge=None, label_above=False):
             w = max(t1 - t0, MIN_W)
             ax.add_patch(mpatches.FancyBboxPatch(
                 (t0 + GAP / 2, y - h / 2), max(w - GAP, MIN_W), h,
                 boxstyle="round,pad=0,rounding_size=0.04", linewidth=1.0 if edge else 0,
                 edgecolor=edge or "none", facecolor=color, alpha=alpha, zorder=3))
-            if label is not None and w > 0.03 * t_max:
+            if label is None:
+                return
+            # does the text fit inside the bar? (rough width: ~0.6 em per character at 7.5 pt,
+            # converted to seconds with the axes scale)
+            def text_w(s):
+                return (len(s) * 0.6 * 7.5 / 72 + 0.08) * t_max / (0.85 * fig_w)
+            if w <= text_w(label):
+                label = label.split("  ")[0]   # too long: keep only the name (e.g. "v13")
+            if w > text_w(label):
                 ax.text(t0 + w / 2, y, label, ha="center", va="center",
                         fontsize=7.5, color=INK, zorder=4, clip_on=True)
+            elif label_above:
+                # bar too narrow for the text: put the name just above it
+                ax.text(t0, y + h / 2 + 0.04, label, ha="left", va="bottom",
+                        fontsize=7, color=INK, zorder=4, clip_on=True)
 
         # --- Global loop -------------------------------------------------
         for k, g in enumerate(gtl):
             # computed in advance (background thread), used from its window start t0
             bar(g.get('sim_time_start', g['t0']), g['sim_time_end'], LANES['g_comp'], C_GLOBAL,
-                label=f"v{g['version']}")
+                label=f"v{g['version']}", label_above=True)
             t_on = max(g['t0'], g['sim_time_end'])
-            t_off = max(gtl[k + 1]['t0'], gtl[k + 1]['sim_time_end']) if k + 1 < len(gtl) else t_end
             (x0, x1), _ = g['window']
             tgt = "GOAL" if g['target_is_goal'] else "band"
-            bar(t_on, t_off, LANES['g_act'], tint(C_GLOBAL), edge=C_GLOBAL,
-                label=f"v{g['version']}  x∈[{x0:.1f}, {x1:.1f}]  → {tgt}")
-            # time interval covered by the global set (may extend past the plot: clipped)
+            space = f"x∈[{x0:.1f}, {x1:.1f}] → {tgt}"
+            # time interval covered by the global set (may extend past the plot: clipped),
+            # with the spatial window it considers and its target
             h0, h1 = g['t0'], g['t0'] + H_GLOBAL
-            more = f"  → {h1:.1f} s" if h1 > t_max else ""
+            t_txt = f"[{h0:.1f}, {h1:.1f}] s" if h1 <= t_max else f"→ {h1:.1f} s"
             bar(h0, min(h1, t_max), LANES['g_hor'][g_row[k]], tint(C_GLOBAL), edge=C_GLOBAL, h=0.5,
-                label=f"v{g['version']}  [{h0:.1f}, {h1:.1f}] s" if not more else f"v{g['version']}{more}")
+                label=f"v{g['version']}  {t_txt}   {space}")
             # global window starts being used by the local sets: dashed line across all lanes
             ax.axvline(t_on, color=INK2, lw=0.8, ls=(0, (4, 3)), zorder=1)
 
@@ -803,7 +835,7 @@ class Animation:
             k = e['set_idx']
             s0 = e.get('sim_start', e['interval'][0])
             s1 = e.get('sim_end', s0)
-            bar(s0, s1, LANES['l_comp'], C_LOCAL)
+            bar(s0, s1, LANES['l_comp'], C_LOCAL, label=f"s{k}", label_above=True)
             h0, h1 = e['interval']
             bar(h0, h1, LANES['l_hor'][k % 2], tint(C_LOCAL), edge=C_LOCAL, h=0.5, label=f"s{k}")
 
@@ -837,9 +869,9 @@ class Animation:
         # --- Axes, lane labels, summary ----------------------------------
         ax.set_xlim(0, t_max)
         ax.set_ylim(0.2, y_top)
-        ax.set_yticks([LANES['g_comp'], LANES['g_act'], float(np.mean(LANES['g_hor'])),
+        ax.set_yticks([LANES['g_comp'], float(np.mean(LANES['g_hor'])),
                        LANES['l_comp'], sum(LANES['l_hor']) / 2, LANES['mpc_ttr'], LANES['mpc']])
-        ax.set_yticklabels(["Global loop · compute", "Global loop · active window",
+        ax.set_yticklabels(["Global loop · compute",
                             "Global loop · set horizons",
                             "Local loop · compute", "Local loop · set horizons",
                             "MPC · progress map (TTR)", "MPC · set in use"], fontsize=9, color=INK)

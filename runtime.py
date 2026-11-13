@@ -136,7 +136,7 @@ class Runtime:
         config.run(self.registry)
 
         t0 = 0.0
-        x0 = [0.5, 2.0, 0.0, 0.0]   # left end of the corridor, heading right
+        x0 = list(config.X_INIT)   # initial state of the selected scenario
 
         self.registry['x0'] = x0
         self.registry['t0'] = t0

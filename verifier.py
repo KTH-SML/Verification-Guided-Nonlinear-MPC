@@ -17,8 +17,23 @@ from pyspect.systems.hj_reachability.bicycle4d import Bicycle4D
 
 import jax
 
-from obstacles import crossing_events
+from obstacles import crossing_events, footprint_extents
 from log import log, rule
+
+
+class ImplicitSet(SetBuilder):
+    """
+    Set given directly by its implicit function fn(impl) (<= 0 inside), with the same
+    convention as the pyspect primitives (halfspace = signed offset, intersection = max,
+    union = min). fn may return a broadcastable array (e.g. no vel axis): it is only
+    expanded to the full grid here, so obstacles inflated per yaw node stay cheap.
+    """
+
+    def __init__(self, fn):
+        self.fn = fn
+
+    def __call__(self, impl, **m):
+        return jnp.asarray(self.fn(impl)) + jnp.zeros(impl.shape)
 
 
 @primitive(ALWAYS('_1'))
@@ -81,7 +96,9 @@ class Verifier:
         self.YW = cfg['YW']
 
         self.OBSTACLES = cfg['obstacles']
-        self.DYN_OBS = cfg['dynamic_obstacle']
+        self.DYN_OBS = cfg['dynamic_obstacles']
+        # Body of the vehicle (None length: point vehicle, obstacles not inflated)
+        self.VEHICLE = cfg.get('vehicle')
 
         self.AXES = cfg['verifier']['axes']
 
@@ -919,14 +936,9 @@ class Verifier:
         bx, by = (x_lo + eps, x_hi - eps), (y_lo + eps, y_hi - eps)
         window_box = BoundedSet(x=bx, y=by)
 
-        # static obstacles clipped to the window (those outside it are ignored)
-        obs_sets = []
-        for (ox, oy, ow, oh) in self.OBSTACLES:
-            cx = (max(ox, bx[0]), min(ox + ow, bx[1]))
-            cy = (max(oy, by[0]), min(oy + oh, by[1]))
-            if cx[0] < cx[1] and cy[0] < cy[1]:
-                obs_sets.append(BoundedSet(x=cx, y=cy))
-        obstacle_union = reduce(Union, obs_sets, EMPTY)
+        # static obstacles inflated by the vehicle body (per yaw node) and clipped to
+        # the window (those that do not reach it are ignored)
+        obstacle_union = ImplicitSet(lambda impl: self._static_obstacles_value(impl, bx, by))
 
         safe_region = Inter(window_box, Compl(obstacle_union))
 
@@ -959,64 +971,80 @@ class Verifier:
         _y0 = between_y[0] # static obstacle initial y position
         return BoundedSet(x=(_x-_w/2, _x+_w/2), y=(_y0-_l/2, _y0+_l/2))
 
-    def _above_line(self, y0: float, t0: float, v: float, duration: float):
+    def _footprint(self, impl):
         """
-        Set {y >= y0 + v * (t - t0)} on the local grid t in [0, duration].
+        Extents (fx_min, fx_max, fy_min, fy_max) of the vehicle body around the rear axle,
+        one per yaw node of `impl` (each node covers +- half a yaw cell), shaped like
+        impl.axis_vec('yaw'). Obstacle O becomes [o_lo - f_max, o_hi - f_min] on each axis.
+        Zeros for a point vehicle.
+        """
+        yaw = np.asarray(impl.axis_vec('yaw'))
+        half = float(impl.axis_step('yaw')) / 2
+        return footprint_extents(self.VEHICLE, yaw - half, yaw + half)
 
-        pyspect requires the half-space offset to lie inside the axis bounds,
-        so the anchor is slid *along* the line into the grid box instead of
-        clamping t0 (which would shift the line in time). If the line misses
-        the box entirely the set is either empty or everything.
-        """
-        y_min, y_max = self.window[1]   # y extent of the current window grid
-        y_start = y0 + v * (0.0 - t0)
-        y_end = y0 + v * (duration - t0)
-        if min(y_start, y_end) > y_max:
-            return EMPTY
-        if max(y_start, y_end) < y_min:
-            return Compl(EMPTY)
-        y_a = float(np.clip(y_start, y_min, y_max))
-        t_a = float(np.clip(t0 + (y_a - y0) / v, 0.0, duration))
-        y_a = float(np.clip(y0 + v * (t_a - t0), y_min, y_max))
-        return HalfSpaceSet(normal=[+1, -v], offset=[y_a, t_a], axes=['y', 't'])
+    def _static_obstacles_value(self, impl, bx, by):
+        """Implicit function of the union of the static obstacles inflated by the vehicle
+        body (per yaw node), clipped to the box bx x by. Shape (1, nx, ny, nyaw, 1)."""
+        x, y = np.asarray(impl.axis_vec('x')), np.asarray(impl.axis_vec('y'))
+        fx_min, fx_max, fy_min, fy_max = self._footprint(impl)
+        value = np.inf
+        for (ox, oy, ow, oh) in self.OBSTACLES:
+            x_lo = np.maximum(ox - fx_max, bx[0])
+            x_hi = np.minimum(ox + ow - fx_min, bx[1])
+            y_lo = np.maximum(oy - fy_max, by[0])
+            y_hi = np.minimum(oy + oh - fy_min, by[1])
+            if not np.any((x_lo < x_hi) & (y_lo < y_hi)):
+                continue   # does not reach the window for any heading
+            value = np.minimum(value, reduce(np.maximum, [x_lo - x, x - x_hi, y_lo - y, y - y_hi]))
+        return value
 
     def build_moving_object_local(self, t_start: float, duration: float):
+        """
+        Union of the moving obstacles over the local window [t_start, t_start + duration]
+        (local time 0 = t_start), inflated by the vehicle body per yaw node.
+        Only the crossings that overlap the window are included.
+        """
+        events = []
+        for p in self.DYN_OBS:
+            for i, v, y_lo0, y_hi0, t_enter, t_exit in crossing_events(p):
+                if t_exit < t_start or t_enter > t_start + duration:
+                    continue
+                events.append((p, v, y_lo0, y_hi0, t_enter - t_start))
+        if not events:
+            return EMPTY
+        window = self.window
+        return ImplicitSet(lambda impl: self._moving_obstacles_value(impl, events, window))
 
-        p = self.DYN_OBS
-        _w = p['width']
-        _x = p['center_x']
-
-        # The obstacle lives in map coordinates: clip its x extent and its band to the
-        # current window (pyspect wants bounds inside the grid; Ellipsis = up to the edge).
-        (x_lo, x_hi), (y_lo, y_hi) = self.window
+    def _moving_obstacles_value(self, impl, events, window):
+        """
+        Implicit function of the moving obstacles in (t, x, y, yaw). For each crossing:
+            x  in [cx - w/2 - fx_max, cx + w/2 - fx_min]        (clipped to the window)
+            y  in [y_bot - fy_max, y_top - fy_min]              (band, open past the window)
+            y >= y_lo0 - fy_max + v (t - t_loc)                  (behind its front ...)
+            y <= y_hi0 - fy_min + v (t - t_loc)                  (... and ahead of its back edge)
+        Shape (nt, nx, ny, nyaw, 1).
+        """
+        (wx_lo, wx_hi), (wy_lo, wy_hi) = window
         eps = 1e-2
-        obs_x = (max(_x - _w / 2, x_lo + eps), min(_x + _w / 2, x_hi - eps))
-        y_bot, y_top = p['between_y']
-        if obs_x[0] >= obs_x[1] or y_top <= y_lo or y_bot >= y_hi:
-            return EMPTY   # the obstacle never enters this window
-        band_y = (... if y_bot <= y_lo else y_bot, ... if y_top >= y_hi else y_top)
-        if band_y == (..., ...):
-            boundary = BoundedSet(x=obs_x)   # band covers the whole window height: no y bound
-        else:
-            boundary = BoundedSet(x=obs_x, y=band_y)
-
-        local_obj = EMPTY
-        for i, v, y_lo0, y_hi0, t_enter, t_exit in crossing_events(p):
-            # skip crossings that do not overlap this window
-            if t_exit < t_start or t_enter > t_start + duration:
-                continue
-            t_loc = t_enter - t_start
-
-            above_back = self._above_line(y_lo0, t_loc, v, duration)
-            below_front = Compl(self._above_line(y_hi0, t_loc, v, duration))
-
-            local_obj = Union(local_obj, reduce(Inter, [
-                above_back,
-                below_front,
-                boundary,
+        t = np.asarray(impl.axis_vec('t'))
+        x, y = np.asarray(impl.axis_vec('x')), np.asarray(impl.axis_vec('y'))
+        fx_min, fx_max, fy_min, fy_max = self._footprint(impl)
+        value = np.inf
+        for p, v, y_lo0, y_hi0, t_loc in events:
+            cx, w = p['center_x'], p['width']
+            y_bot, y_top = p['between_y']
+            x_lo = np.maximum(cx - w / 2 - fx_max, wx_lo + eps)
+            x_hi = np.minimum(cx + w / 2 - fx_min, wx_hi - eps)
+            band_lo = np.where(y_bot - fy_max <= wy_lo, -np.inf, y_bot - fy_max)
+            band_hi = np.where(y_top - fy_min >= wy_hi, np.inf, y_top - fy_min)
+            back = y_lo0 - fy_max + v * (t - t_loc)
+            front = y_hi0 - fy_min + v * (t - t_loc)
+            value = np.minimum(value, reduce(np.maximum, [
+                x_lo - x, x - x_hi,
+                band_lo - y, y - band_hi,
+                back - y, y - front,
             ]))
-
-        return local_obj
+        return value
 
     def save_set(self, data, number):
         os.makedirs(self.save_name, exist_ok=True)
