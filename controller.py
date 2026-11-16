@@ -311,6 +311,8 @@ class Controller:
                 self.current_loaded_set_name = current_set_name
                 self.latest_info = dict(info)
                 self.latest_vf = self.registry[current_set_name + '.vf']
+                # full 4D set, for V at the vehicle's own (yaw, vel) (diagnostic only)
+                self.latest_vf_full = self.latest_vf
                 if self.safety_v_mode == 'min':
                     # same as the TTR map: only depends on (t, x, y). Kept on the full
                     # grid shape so the interpolation and the surrogate are unchanged.
@@ -421,6 +423,14 @@ class Controller:
 
     def evaluate_interp_cost(self, time, state):
         return self.evaluate_real_cost(time, state)
+
+    def evaluate_state_cost(self, time, state):
+        """V of the active set at the vehicle's own (yaw, vel), not the min over them.
+        Same as evaluate_real_cost when SAFETY_V_MODE = 'state'."""
+        t_pts = np.array([time])
+        x_pts = np.array(state, dtype=float).reshape(1, NX)
+        return float(self._query_vf(t_pts, x_pts, vf=self.latest_vf_full,
+                                    time_grid=self.vf_time_grid, grids=self.vf_grids)[0])
 
     def compute_control(self, time, state):
 
@@ -621,6 +631,7 @@ class Controller:
 
         real_cost   = []
         interp_cost = []
+        state_cost  = []
 
         # Timeline: set_idx of the safety set and global version of the progress (TTR) map
         # used at each MPC step (index k -> step k)
@@ -665,6 +676,7 @@ class Controller:
 
             real_cost.append(self.evaluate_real_cost(t, x))
             interp_cost.append(self.evaluate_interp_cost(t, x))
+            state_cost.append(self.evaluate_state_cost(t, x))
 
             real_path.append([t + self.TIMESTEP] + list(next_state))
 
@@ -687,6 +699,7 @@ class Controller:
             'input_hist': input_hist,
             'real_cost': real_cost,
             'interp_cost': interp_cost,
+            'state_cost': state_cost,
             'latest_vf': self.latest_vf,
             'latest_info': self.latest_info,
             'vf_interp': VFInterp(

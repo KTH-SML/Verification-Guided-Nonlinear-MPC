@@ -23,8 +23,8 @@ if SCENARIO not in ('corridor', 'urban_road'):
 HJ_TIMESTEP = 0.2    # s
 # HJ_HORIZON (s, time length of each global window, receding horizon): see the scenarios below
 HJ_PREDICTION = 2.0  # s
-HJ_DELAY      = 0.9   # s, how far in the future each local window starts (T_DELAY)
-HJ_LOCAL_PERIOD = 1.0  # s, fixed time between the starts of consecutive local windows (T_L)
+HJ_DELAY      = 0.8   # s, how far in the future each local window starts (T_DELAY)
+HJ_LOCAL_PERIOD = 0.8  # s, fixed time between the starts of consecutive local windows (T_L)
 # Local schedule (simulation time): window k = [k*T_L, k*T_L + HJ_PREDICTION], computed
 # at k*T_L - HJ_DELAY. Requirements:
 #   local compute time <= HJ_DELAY        (set ready before its window starts)
@@ -46,6 +46,8 @@ HJ_CROP_MARGIN = 2                            # extra cells per side (numerical 
 # re-solved on a WINDOW_W x WINDOW_H spatial window placed around the vehicle
 # (WINDOW_BACK metres behind it, the rest ahead). The target is a band of depth
 # GLOBAL_TARGET_DEPTH on the right edge of the window, or GOAL once it is inside.
+# GLOBAL_TARGET_Y = (y_lo, y_hi) restricts the band to a range of y (e.g. one lane);
+# None: the whole window height.
 # Global schedule (simulation time): global j covers [j*T_U, j*T_U + HJ_HORIZON], is
 # computed from j*T_U - T_G on the state at that moment, and is used by the local
 # windows starting in [j*T_U, (j+1)*T_U). Requirements:
@@ -56,8 +58,8 @@ HJ_CROP_MARGIN = 2                            # extra cells per side (numerical 
 #                                            not pass the target band before the next global is used)
 #   (WINDOW_W - WINDOW_BACK) / MAX_VEL + MAX_VEL / (2 MAX_ACCEL) < HJ_HORIZON  (from standstill the
 #                                            target band is reachable within the global horizon)
-GLOBAL_UPDATE       = 2.0          # s, T_U: global j covers [j*T_U, j*T_U + HJ_HORIZON]
-GLOBAL_LEAD         = 1.5          # s, T_G: global j is computed from j*T_U - T_G (background thread)
+GLOBAL_UPDATE       = 2.6          # s, T_U: global j covers [j*T_U, j*T_U + HJ_HORIZON]
+GLOBAL_LEAD         = 2.6          # s, T_G: global j is computed from j*T_U - T_G (background thread)
 # WINDOW_W, WINDOW_H, WINDOW_BACK, GLOBAL_TARGET_DEPTH, MISSION_TIME: see the scenarios below
 
 # ------------------------------------------------------------------
@@ -73,7 +75,7 @@ Qhj          = 1.0        # cost weight for the time-to-reach (progress) map
 # safe solution exists, but the solver does not break on small violations.
 # SAFETY_MARGIN (extra margin on the value function, m): see the scenarios below
 SAFETY_SLACK_L1 = 1e3     # linear penalty on the slack
-SAFETY_SLACK_L2 = 1e2     # quadratic penalty on the slack
+SAFETY_SLACK_L2 = 0     # quadratic penalty on the slack
 
 # Local value function used by the safety constraint:
 #   'state' : V_l(t, x, y, yaw, vel) at the predicted state (sufficient for safety)
@@ -129,8 +131,9 @@ if SCENARIO == 'corridor':
     WINDOW_W, WINDOW_H  = 5.0, 4.0     # m
     WINDOW_BACK         = 1.5          # m
     GLOBAL_TARGET_DEPTH = 0.3          # m
+    GLOBAL_TARGET_Y     = None         # band over the whole window height
     MISSION_TIME        = 20.0         # s
-    SAFETY_MARGIN       = 0.0
+    SAFETY_MARGIN       = 0.2
 
     X0, Y0 = 0.0, 0.0
     XW, YW = 12.0, 4.0
@@ -161,21 +164,21 @@ elif SCENARIO == 'urban_road':
 
     # Urban driving (30 km/h zone). The verifier assumes less control authority
     # than the MPC uses, as in the corridor scenario.
-    MAX_VEL_VERIFIER   = 7.0    # m/s (28.8 km/h)
+    MAX_VEL_VERIFIER   = 6.0    # m/s (28.8 km/h)
     MAX_ACCEL_VERIFIER = 10.0    # m/s^2
     MAX_STEER_VERIFIER = 0.5     # rad (~29 deg at the wheels)
-    MAX_VEL_MPC        = 9.0    # m/s, must not exceed the HJ velocity grid
+    MAX_VEL_MPC        = 7.0    # m/s, must not exceed the HJ velocity grid
     MAX_ACCEL_MPC      = 12.0    # m/s^2 (comfortable braking / acceleration)
     MAX_STEER_MPC      = 0.6    # rad
 
     # Window: MAX_VEL * (T_G + T_U + HJ_PREDICTION) = 8 * 5 = 40 m <= WINDOW_W - WINDOW_BACK = 42 m.
     # The window covers the whole road width.
     # From standstill: 42 / 8 + 8 / (2 * 2) = 7.25 s to the target band -> horizon 9 s.
-    HJ_HORIZON          = 8.0          # s
+    HJ_HORIZON          = 10.0          # s
     WINDOW_W            = 48.0         # m (WINDOW_H = road width, set below)
     WINDOW_BACK         = 6.0          # m
     GLOBAL_TARGET_DEPTH = 2.0          # m (2 cells in x)
-    MISSION_TIME        = 20.0         # s
+    MISSION_TIME        = 30.0         # s
     SAFETY_MARGIN       = 0.2
 
     # Straight two-lane road, 120 m long, lanes of 3.5 m with a shoulder on each side
@@ -203,7 +206,9 @@ elif SCENARIO == 'urban_road':
         (96.0, Y_RIGHT + 0.3, 4.5, 1.8),                           # broken-down car, right lane
     ]
     # Stop in the right lane past the last crosswalk (rear axle in the box, vel = 0)
-    GOAL = (110.0, Y_RIGHT + LANE_WIDTH / 2 - 0.5, 5.0, 1.0)
+    GOAL = (110.0, Y_RIGHT, 5.0, LANE_WIDTH)          # whole right lane
+    # Band of the global target: right lane only (direction of travel)
+    GLOBAL_TARGET_Y = (Y_RIGHT, Y_CENTRE)
 
     # Road users crossing the whole road (y in [0, YW]) at different places and times
     ROAD = (Y0, Y0 + YW)
@@ -287,6 +292,7 @@ def run(registry):
             window_size         = (WINDOW_W, WINDOW_H),
             window_back         = WINDOW_BACK,
             global_target_depth = GLOBAL_TARGET_DEPTH,
+            global_target_y     = GLOBAL_TARGET_Y,
         ),
         # MPC
         controller = dict(

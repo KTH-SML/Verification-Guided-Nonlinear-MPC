@@ -117,6 +117,7 @@ class Verifier:
         self.WINDOW_BACK = cfg['verifier']['window_back']
         self.GLOBAL_UPDATE = cfg['verifier']['global_update']
         self.GLOBAL_TARGET_DEPTH = cfg['verifier']['global_target_depth']
+        self.GLOBAL_TARGET_Y = cfg['verifier'].get('global_target_y')   # (y_lo, y_hi) or None
         self.window = None
         self.global_version = -1
         self.global_t0 = None
@@ -290,15 +291,10 @@ class Verifier:
             set_tag = f"Local s{data_set_no}"
             loop_start = tm.time()
 
-            moving_obj_local = self.build_moving_object_local(t_plan_start, self.T_PRED)
-
-            safe_region_local = Inter(self.env['safe_region'], Compl(moving_obj_local))
-            # safe_region_local = env['safe_region']
-
-            # Safety set (used as a constraint by the MPC): avoid all obstacles during the
-            # window and end in a state from which the goal is still reachable at all.
-            # Global slice at t = 0 = largest time budget, so waiting is never "unsafe".
-            target_local = self.get_local_terminal_target(self.out1, t_plan_end)
+            # Local task: ALWAYS(Phi_global(t) and not dynamic obstacles(t)) over the window.
+            # Phi_global already excludes the static obstacles and contains the global target,
+            # so staying in it keeps the goal reachable (liveness is inherited from the global).
+            phi_local = self.build_local_phi(t_plan_start)
 
             # Spatial crop: the sets are built on the full local grid (cheap), then
             # restricted to the bounding box of the global zero sublevel set over
@@ -326,9 +322,8 @@ class Verifier:
                 out2 = np.ones((len(self.impl_local.timeline), *n_full), dtype=np.float32)
                 pde_end = tm.time()
             else:
-                safe_crop = self.crop(safe_region_local(self.impl_local))
-                target_crop = self.crop(target_local(self.impl_local))
-                task_local = UNTIL(Set(safe_crop), Set(target_crop))
+                phi_crop = self.crop(phi_local(self.impl_local))
+                task_local = ALWAYS(Set(phi_crop))
 
                 out2_crop = np.asarray(TLT.construct(task_local).realize(self.impl_crop))
                 pde_end = tm.time()
@@ -463,7 +458,10 @@ class Verifier:
         Returns {version, t0, window, env, out1}.
         """
         compute_start = tm.time()
-        sim_start = float(self.registry.get('time', t_g))
+        # 'time' is written by the MPC from its first step on; before that the simulation is
+        # at its start (0), not at t_g: globals solved while the MPC waits for the first
+        # local set (v0, and v1 if GLOBAL_LEAD >= GLOBAL_UPDATE) are computed at time 0
+        sim_start = float(self.registry.get('time', 0.0))
         window = self.place_window(state)
         self._move_window(self.impl_global, window)
 
@@ -493,7 +491,7 @@ class Verifier:
         np.save(xy_path, out1.min(axis=(3, 4)))
 
         compute_end = tm.time()
-        sim_end = float(self.registry.get('time', t_g))
+        sim_end = float(self.registry.get('time', 0.0))
         self.global_timeline.append(dict(
             info,
             xy_path=xy_path,
@@ -538,6 +536,14 @@ class Verifier:
         """
         j = 1
         try:
+            # The schedule runs on simulation time, which starts with the first MPC step
+            # (after global 0 and the first local set). Wait for it, so that a global whose
+            # tick is at the start (t_g - GLOBAL_LEAD <= t_ref) is computed from the start of
+            # the run, not during the initialisation (where it would also slow down set 0).
+            while self.registry.get('time') is None:
+                if self.stop_event.is_set():
+                    return
+                tm.sleep(0.005)
             while not self.stop_event.is_set():
                 t_g = t_ref + j * self.GLOBAL_UPDATE
                 if t_g > self.MISSION_TIME - self.T_PRED + 1e-9:
@@ -898,6 +904,21 @@ class Verifier:
         <= 0: the state can avoid all obstacles during the window and still reach the goal."""
         return float(np.asarray(out2)[(0, *self.state_indices(state))])
 
+    def get_global_tube_local(self, out1_global, t_start: float):
+        """Global set over the local window [t_start, t_start + T_PRED], on the local time axis:
+        local index i <- nearest global slice at t_start + t_i (clipped to the global horizon).
+        Shape (nt_local, x, y, yaw, vel)."""
+        t_glob = np.asarray(self.impl.timeline)
+        t_loc = np.clip(t_start - self.global_t0 + np.asarray(self.impl_local.timeline), 0.0, self.HORIZON)
+        idx = np.abs(t_glob[None, :] - t_loc[:, None]).argmin(axis=1)
+        return np.asarray(out1_global)[idx]
+
+    def build_local_phi(self, t_start: float):
+        """Phi_local(t) = Phi_global(t) minus the moving obstacles, over [t_start, t_start + T_PRED]."""
+        tube = self.get_global_tube_local(self.out1, t_start)
+        moving = self.build_moving_object_local(t_start, self.T_PRED)
+        return Inter(ImplicitSet(lambda impl: tube), Compl(moving))
+
     def get_local_terminal_target(self, out1_global, t_global: float):
         """Terminal target for the local problem: global set sliced at global time t_global,
         united with the current global target (band on the window edge or final goal)."""
@@ -927,7 +948,8 @@ class Verifier:
             limit of the map portion considered now.
         target_loc: the final GOAL if it lies inside the window, otherwise a band of depth
             GLOBAL_TARGET_DEPTH along the right edge of the window (direction of travel),
-            outside the obstacles.
+            outside the obstacles, restricted to GLOBAL_TARGET_Y (e.g. the right lane). If a
+            static obstacle covers that band, the band uses the whole window height.
         """
         (x_lo, x_hi), (y_lo, y_hi) = window
 
@@ -950,12 +972,38 @@ class Verifier:
             target_rect = tuple(self.GOAL)
         else:
             band_x = (max(x_hi - self.GLOBAL_TARGET_DEPTH, bx[0]), bx[1])
-            target_loc = Inter(BoundedSet(x=band_x, y=by), safe_region)
-            target_rect = (band_x[0], by[0], band_x[1] - band_x[0], by[1] - by[0])
+            band_y = by
+            if self.GLOBAL_TARGET_Y is not None:
+                lane = (max(self.GLOBAL_TARGET_Y[0], by[0]), min(self.GLOBAL_TARGET_Y[1], by[1]))
+                # a blocked lane band (e.g. broken-down car at the window edge) would leave the
+                # global problem without target: then use the whole height
+                if lane[1] > lane[0] and not self._band_blocked(band_x, lane):
+                    band_y = lane
+            target_loc = Inter(BoundedSet(x=band_x, y=band_y), safe_region)
+            target_rect = (band_x[0], band_y[0], band_x[1] - band_x[0], band_y[1] - band_y[0])
 
         # target_rect / target_is_goal: only for logging and animation
         return dict(safe_region=safe_region, target_loc=target_loc,
                     target_rect=target_rect, target_is_goal=target_is_goal)
+
+    def _band_blocked(self, band_x, band_y, min_free=1.0):
+        """True if static obstacles, enlarged by the vehicle length in x (the body around the
+        rear axle) and half its width in y, leave less than `min_free` metres of the target
+        band free in y."""
+        veh = self.VEHICLE or {}
+        mx = veh.get('length', 0.0)
+        my = 0.5 * veh.get('width', 0.0)
+        cuts = sorted((max(oy - my, band_y[0]), min(oy + oh + my, band_y[1]))
+                      for (ox, oy, ow, oh) in self.OBSTACLES
+                      if ox - mx < band_x[1] and band_x[0] < ox + ow + mx)
+        free, y = 0.0, band_y[0]
+        for lo, hi in cuts:
+            if hi <= lo:
+                continue
+            free = max(free, lo - y)
+            y = max(y, hi)
+        free = max(free, band_y[1] - y)
+        return free < min_free
 
     def build_static_object(
             self,

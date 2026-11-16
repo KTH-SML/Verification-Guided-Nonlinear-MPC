@@ -659,9 +659,9 @@ class Animation:
             if len(cost_arr) > 0:
                 time_axis = np.arange(len(cost_arr)) * self.config['controller']['timestep']
                 ax4.plot(time_axis, cost_arr[:, 0],
-                         color="steelblue", linewidth=1.5, label="Real Cost")
+                         color="steelblue", linewidth=1.5, label="V used by the MPC")
                 ax4.plot(time_axis, cost_arr[:, 1],
-                         color="coral",     linewidth=1.5, label="Interpolated Cost")
+                         color="coral",     linewidth=1.5, label="V at vehicle's yaw, vel")
                 ax4.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
                 if frame_idx < len(cost_arr):
                     ax4.axvline(time_axis[frame_idx],
@@ -908,6 +908,36 @@ class Animation:
         log("Animation", f"timeline saved to {save_path}")
         plt.close(fig)
 
+    def save_run_data(self, path: str = "results/run_data.pkl") -> None:
+        """Dump the run (timelines, trajectory, HJ value) for the paper figures (plot_paper.py)."""
+        import pickle
+        results = self.registry.get('results', {})
+        data = {
+            'config':          dict(self.config),
+            'global_timeline': list(self.registry.get('verifier.global_timeline', [])),
+            'local_timeline':  list(self.registry.get('verifier.timeline', [])),
+            'controller':      dict(self.registry.get('controller.timeline', {})),
+            'mission_done':    self.registry.get('mission.done', None),
+            'real_path':       np.asarray(results.get('real_path', []), dtype=float),
+            'real_cost':       np.asarray(results.get('real_cost', []), dtype=float),
+            'state_cost':      np.asarray(results.get('state_cost', []), dtype=float),
+            # MPC predicted trajectory at every step, shape (n_steps, N+1, NX)
+            'pred_path':       np.asarray(results.get('pred_path', []), dtype=float),
+        }
+        # (x, y) projection of every short-horizon set, min over (yaw, vel), shape (T, nx, ny),
+        # on the grid of its global window (snapshot figures, plot_snapshots.py). The full
+        # sets in ./sets are deleted by the next run.
+        local_xy = {}
+        for e in data['local_timeline']:
+            p = e.get('path')
+            if p and os.path.exists(p):
+                local_xy[e['set_idx']] = np.load(p).min(axis=(3, 4)).astype(np.float32)
+        data['local_xy'] = local_xy
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
+        log("Animation", f"run data saved to {path}")
+
     def run(self):
 
         while self.registry.get("results") is None:
@@ -922,13 +952,16 @@ class Animation:
         ctl = self.registry.get('controller.timeline', {})
         used_sets = ctl['used_sets']
 
+        self.save_run_data()
+
         self.animate_heat_map_global(
             verifier_timeline=verifier_timeline,
             used_sets=used_sets,
             real_path=results["real_path"],
             pred_path=results["pred_path"],
             real_cost=results["real_cost"],
-            interp_cost=results["interp_cost"],
+            # V at the vehicle's own (yaw, vel); older runs: the (duplicate) interpolated cost
+            interp_cost=results.get("state_cost", results["interp_cost"]),
             save_name="vf_debug",
             obstacles=self.OBSTACLES,
             interval_ms=100,
