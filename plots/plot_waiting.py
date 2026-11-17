@@ -50,8 +50,8 @@ class Run:
         self.cfg = d['config']
         self.path = np.asarray(d['real_path'], float)          # t, x, y, yaw, vel
         self.used = list(d['controller']['used_sets'])
-        self.local = {e['set_idx']: e for e in d['local_timeline']}
-        self.globals = {g['version']: g for g in d['global_timeline']}
+        self.short = {e['set_idx']: e for e in d['short_timeline']}
+        self.long = {g['version']: g for g in d['long_timeline']}
         self.n = min(len(self.path), len(self.used))
         self.root = root
         self.dt_hj = self.cfg['verifier']['timestep']
@@ -66,16 +66,16 @@ class Run:
         return int(np.argmin(np.abs(self.path[:self.n, 0] - t)))
 
     def set_entry(self, k):
-        return self.local.get(self.used[k])
+        return self.short.get(self.used[k])
 
     def gv(self, k):
         e = self.set_entry(k)
-        return None if e is None else e.get('global_version')
+        return None if e is None else e.get('long_version')
 
     def xy(self, sid):
         """(min over yaw, vel) of short-horizon set sid: (NT, nx, ny), and its x, y grids."""
         if sid not in self._xy:
-            e = self.local[sid]
+            e = self.short[sid]
             p = e['path'] if os.path.isabs(e['path']) else os.path.join(self.root, e['path'])
             Z = np.load(p, mmap_mode="r")
             Z = np.asarray(Z).min(axis=(3, 4))
@@ -87,11 +87,11 @@ class Run:
         """Zero-level data of the set used at step k, at the time of step k."""
         sid = self.used[k]
         Z, gx, gy = self.xy(sid)
-        it = int(np.clip(round((self.t(k) - self.local[sid]['interval'][0]) / self.dt_hj), 0, Z.shape[0] - 1))
+        it = int(np.clip(round((self.t(k) - self.short[sid]['interval'][0]) / self.dt_hj), 0, Z.shape[0] - 1))
         return Z[it], gx, gy
 
     def deadline(self, k):
-        g = self.globals.get(self.gv(k))
+        g = self.long.get(self.gv(k))
         return None if g is None else g['t0'] + self.horizon
 
 

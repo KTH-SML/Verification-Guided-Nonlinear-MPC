@@ -21,22 +21,22 @@ if SCENARIO not in ('corridor', 'urban_road'):
 # ------------------------------------------------------------------
 
 HJ_TIMESTEP = 0.2    # s
-# HJ_HORIZON (s, time length of each global window, receding horizon): see the scenarios below
+# HJ_HORIZON (s, time length of each long-horizon window, receding horizon): see the scenarios below
 HJ_PREDICTION = 2.0  # s
-HJ_DELAY      = 0.8   # s, how far in the future each local window starts (T_DELAY)
-HJ_LOCAL_PERIOD = 0.8  # s, fixed time between the starts of consecutive local windows (T_L)
-# Local schedule (simulation time): window k = [k*T_L, k*T_L + HJ_PREDICTION], computed
+HJ_DELAY      = 0.8   # s, how far in the future each short-horizon window starts (T_DELAY)
+HJ_SHORT_PERIOD = 0.8  # s, fixed time between the starts of consecutive short-horizon windows (T_L)
+# Short-horizon schedule (simulation time): window k = [k*T_L, k*T_L + HJ_PREDICTION], computed
 # at k*T_L - HJ_DELAY. Requirements:
-#   local compute time <= HJ_DELAY        (set ready before its window starts)
-#   local compute time <= HJ_LOCAL_PERIOD (the schedule does not drift)
-#   HJ_LOCAL_PERIOD    <  HJ_PREDICTION   (consecutive local sets overlap)
+#   short-horizon compute time <= HJ_DELAY        (set ready before its window starts)
+#   short-horizon compute time <= HJ_SHORT_PERIOD (the schedule does not drift)
+#   HJ_SHORT_PERIOD    <  HJ_PREDICTION   (consecutive short-horizon sets overlap)
 
-# Spatial crop of the local grid: the local PDE is solved only on a box of the window.
+# Spatial crop of the short-horizon grid: the short-horizon PDE is solved only on a box of the window.
 #   'none'       : whole window (reference, no crop)
 #   'reach'      : box reachable from the current state in HJ_DELAY + HJ_PREDICTION
 #                  with worst-case speeds (fixed size, centred on the vehicle)
-#   'zero_level' : bounding box of the global zero sublevel set over the local window
-#                  (the local set is contained in it). The size is set by the first set and
+#   'zero_level' : bounding box of the long-horizon zero sublevel set over the short-horizon window
+#                  (the short-horizon set is contained in it). The size is set by the first set and
 #                  kept afterwards: an axis only grows when the needed box does not fit
 #                  (fewer shapes -> fewer JIT compilations)
 # Per-set statistics are written to results/crop_<method>.csv.
@@ -44,25 +44,25 @@ HJ_CROP_METHOD = 'zero_level'
 HJ_CROP_AXES   = ('x', 'y', '*yaw', 'vel')   # axes to crop (names as in AXES)
 HJ_CROP_MARGIN = 2                            # extra cells per side (numerical boundary effects)
 
-# Receding global window: every GLOBAL_UPDATE seconds the global problem is
+# Receding long-horizon window: every LONG_UPDATE seconds the long-horizon problem is
 # re-solved on a WINDOW_W x WINDOW_H spatial window placed around the vehicle
 # (WINDOW_BACK metres behind it, the rest ahead). The target is a band of depth
-# GLOBAL_TARGET_DEPTH on the right edge of the window, or GOAL once it is inside.
-# GLOBAL_TARGET_Y = (y_lo, y_hi) restricts the band to a range of y (e.g. one lane);
+# LONG_TARGET_DEPTH on the right edge of the window, or GOAL once it is inside.
+# LONG_TARGET_Y = (y_lo, y_hi) restricts the band to a range of y (e.g. one lane);
 # None: the whole window height.
-# Global schedule (simulation time): global j covers [j*T_U, j*T_U + HJ_HORIZON], is
-# computed from j*T_U - T_G on the state at that moment, and is used by the local
+# Long-horizon schedule (simulation time): long-horizon set j covers [j*T_U, j*T_U + HJ_HORIZON], is
+# computed from j*T_U - T_G on the state at that moment, and is used by the short-horizon
 # windows starting in [j*T_U, (j+1)*T_U). Requirements:
-#   global compute time <= T_G - HJ_DELAY   (ready before the first local set using it is computed)
-#   global compute time <= T_U              (the schedule does not drift)
-#   T_U + HJ_PREDICTION <= HJ_HORIZON       (every local window ends inside its global horizon)
+#   long-horizon compute time <= T_G - HJ_DELAY   (ready before the first short-horizon set using it is computed)
+#   long-horizon compute time <= T_U              (the schedule does not drift)
+#   T_U + HJ_PREDICTION <= HJ_HORIZON       (every short-horizon window ends inside its long-horizon set)
 #   MAX_VEL * (T_G + T_U + HJ_PREDICTION) <= WINDOW_W - WINDOW_BACK  (worst case: the vehicle does
-#                                            not pass the target band before the next global is used)
+#                                            not pass the target band before the next long-horizon set is used)
 #   (WINDOW_W - WINDOW_BACK) / MAX_VEL + MAX_VEL / (2 MAX_ACCEL) < HJ_HORIZON  (from standstill the
-#                                            target band is reachable within the global horizon)
-GLOBAL_UPDATE       = 2.6          # s, T_U: global j covers [j*T_U, j*T_U + HJ_HORIZON]
-GLOBAL_LEAD         = 2.6          # s, T_G: global j is computed from j*T_U - T_G (background thread)
-# WINDOW_W, WINDOW_H, WINDOW_BACK, GLOBAL_TARGET_DEPTH, MISSION_TIME: see the scenarios below
+#                                            target band is reachable within the long horizon)
+LONG_UPDATE       = 2.6          # s, T_U: long-horizon set j covers [j*T_U, j*T_U + HJ_HORIZON]
+LONG_LEAD         = 2.6          # s, T_G: long-horizon set j is computed from j*T_U - T_G (background thread)
+# WINDOW_W, WINDOW_H, WINDOW_BACK, LONG_TARGET_DEPTH, MISSION_TIME: see the scenarios below
 
 # ------------------------------------------------------------------
 # MPC (controller)
@@ -79,7 +79,7 @@ Qhj          = 1.0        # cost weight for the time-to-reach (progress) map
 SAFETY_SLACK_L1 = 1e3     # linear penalty on the slack
 SAFETY_SLACK_L2 = 1e2     # quadratic penalty on the slack
 
-# Local value function used by the safety constraint:
+# Short-horizon value function used by the safety constraint:
 #   'state' : V_l(t, x, y, yaw, vel) at the predicted state (sufficient for safety)
 #   'min'   : min over (yaw, vel) of V_l, i.e. it only depends on (t, x, y), like the
 #             TTR map. Only a NECESSARY condition: the constraint is satisfied if SOME
@@ -99,7 +99,7 @@ SAFETY_V_MODE   = 'state'
 #
 # Map
 #   X0, Y0: lower-left corner of the map, XW, YW: its size. The whole map (the
-#   "city") is never gridded: only the global window is.
+#   "city") is never gridded: only the long-horizon window is.
 #   OBSTACLES, GOAL: (x_min, y_min, width, height). OBSTACLES matches the
 #   geometry in verifier.build_env() and the animations.
 #
@@ -109,7 +109,7 @@ SAFETY_V_MODE   = 'state'
 #   with dir = +1 (towards +y) / -1 (towards -y). One crossing lasts
 #   (band + length) / speed. Shared by verifier.py and animation.py (obstacles.py).
 #
-# Grid: GRID_POINTS = number of nodes for (x, y, yaw, vel) of the global WINDOW.
+# Grid: GRID_POINTS = number of nodes for (x, y, yaw, vel) of the long-horizon WINDOW.
 # ------------------------------------------------------------------
 
 if SCENARIO == 'corridor':
@@ -132,8 +132,8 @@ if SCENARIO == 'corridor':
     HJ_HORIZON          = 7.0          # s, (5 - 1.5) / 0.7 + 0.7 / 1.0 = 5.7 s from standstill
     WINDOW_W, WINDOW_H  = 5.0, 4.0     # m
     WINDOW_BACK         = 1.5          # m
-    GLOBAL_TARGET_DEPTH = 0.3          # m
-    GLOBAL_TARGET_Y     = None         # band over the whole window height
+    LONG_TARGET_DEPTH   = 0.3          # m
+    LONG_TARGET_Y       = None         # band over the whole window height
     MISSION_TIME        = 20.0         # s
     SAFETY_MARGIN       = 0.2
 
@@ -179,7 +179,7 @@ elif SCENARIO == 'urban_road':
     HJ_HORIZON          = 10.0          # s
     WINDOW_W            = 48.0         # m (WINDOW_H = road width, set below)
     WINDOW_BACK         = 6.0          # m
-    GLOBAL_TARGET_DEPTH = 2.0          # m (2 cells in x)
+    LONG_TARGET_DEPTH   = 2.0          # m (2 cells in x)
     MISSION_TIME        = 30.0         # s
     SAFETY_MARGIN       = 0.2
 
@@ -209,8 +209,8 @@ elif SCENARIO == 'urban_road':
     ]
     # Stop in the right lane past the last crosswalk (rear axle in the box, vel = 0)
     GOAL = (110.0, Y_RIGHT, 5.0, LANE_WIDTH)          # whole right lane
-    # Band of the global target: right lane only (direction of travel). None: whole road
-    GLOBAL_TARGET_Y = (Y_RIGHT, Y_CENTRE)
+    # Band of the long-horizon target: right lane only (direction of travel). None: whole road
+    LONG_TARGET_Y = (Y_RIGHT, Y_CENTRE)
 
     # Road users crossing the whole road (y in [0, YW]) at different places and times
     ROAD = (Y0, Y0 + YW)
@@ -233,8 +233,8 @@ elif SCENARIO == 'urban_road':
     # Right lane centre, heading along the road, standing still
     X_INIT = [5.0, Y_RIGHT + LANE_WIDTH / 2, 0.0, 0.0]
 
-# Axes of the global WINDOW grid (not of the whole map). x, y bounds are those
-# of the initial window: the verifier moves them at every global update,
+# Axes of the long-horizon WINDOW grid (not of the whole map). x, y bounds are those
+# of the initial window: the verifier moves them at every long-horizon update,
 # keeping the same shape and resolution (snapped to a lattice anchored at X0, Y0).
 # '*' prefix means periodic (pyspect convention);
 # consumers triple-concat yaw to extend from [-pi, pi] to [-3pi, 3pi]
@@ -283,18 +283,18 @@ def run(registry):
             horizon   = HJ_HORIZON,
             t_prediction = HJ_PREDICTION,
             t_delay      = HJ_DELAY,
-            local_period = HJ_LOCAL_PERIOD,
+            short_period = HJ_SHORT_PERIOD,
             crop_method  = HJ_CROP_METHOD,
             crop_axes    = HJ_CROP_AXES,
             crop_margin  = HJ_CROP_MARGIN,
             axes         = AXES,
-            # Receding global window
-            global_update       = GLOBAL_UPDATE,
-            global_lead         = GLOBAL_LEAD,
+            # Receding long-horizon window
+            long_update         = LONG_UPDATE,
+            long_lead           = LONG_LEAD,
             window_size         = (WINDOW_W, WINDOW_H),
             window_back         = WINDOW_BACK,
-            global_target_depth = GLOBAL_TARGET_DEPTH,
-            global_target_y     = GLOBAL_TARGET_Y,
+            long_target_depth   = LONG_TARGET_DEPTH,
+            long_target_y       = LONG_TARGET_Y,
         ),
         # MPC
         controller = dict(

@@ -1,7 +1,7 @@
 """
-3D figure of the first global set Phi (global v0) of the selected scenario.
+3D figure of the first long-horizon set Phi (long-horizon set v0) of the selected scenario.
 
-Global v0 is computed exactly as in Verifier.solve_global(0, ...): window placed around
+Long-horizon set v0 is computed exactly as in Verifier.solve_long(0, ...): window placed around
 X_INIT, task UNTIL(safe_region, target_loc) with static obstacles only. The 4D state
 (x, y, yaw, vel) is projected onto (x, y) by the minimum over yaw and vel (the same
 projection the verifier saves for the animation), or sliced at a given (yaw, vel), and the
@@ -9,12 +9,12 @@ zero level set is drawn as an isosurface in (x, y, t), as impl.plot(..., axes=('
 does in the notebooks. Static obstacles and the target are drawn as boxes over the horizon.
 
 Usage:
-    python3 plots/plot_global_phi.py                        # min over (yaw, vel)
-    python3 plots/plot_global_phi.py --proj slice --yaw 0 --vel 0
-    python3 plots/plot_global_phi.py --recompute            # ignore the cached set
-    SCENARIO=corridor python3 plots/plot_global_phi.py
+    python3 plots/plot_long_phi.py                        # min over (yaw, vel)
+    python3 plots/plot_long_phi.py --proj slice --yaw 0 --vel 0
+    python3 plots/plot_long_phi.py --recompute            # ignore the cached set
+    SCENARIO=corridor python3 plots/plot_long_phi.py
 
-Outputs in results/paper/: global0_<scenario>.npz (cache), global0_<scenario>_<proj>.html,
+Outputs in results/paper/: long0_<scenario>.npz (cache), long0_<scenario>_<proj>.html,
 and .pdf/.png if kaleido is installed (pip install kaleido).
 """
 import argparse
@@ -45,41 +45,41 @@ OUT_DIR = os.path.join("results", "paper")
 
 
 # ------------------------------------------------------------------
-# Global v0
+# Long-horizon set v0
 # ------------------------------------------------------------------
 
-def compute_global0(cfg_registry):
-    """Same computation as Verifier.solve_global(0, 0, X_INIT), without its side effects."""
+def compute_long0(cfg_registry):
+    """Same computation as Verifier.solve_long(0, 0, X_INIT), without its side effects."""
     Verifier.load_from_file = True                           # do not wipe ./sets
     Verifier.results_dir = os.path.join(OUT_DIR, "_tmp")     # do not overwrite results/crop_*.csv
     ver = Verifier(cfg_registry, None, None)
 
     state = cfg_registry['config']['x_init']
     window = ver.place_window(state)
-    ver._move_window(ver.impl_global, window)
+    ver._move_window(ver.impl_long, window)
     env = ver.build_env(window)
 
     t0 = time.time()
-    out1 = np.asarray(TLT.construct(UNTIL(env['safe_region'], env['target_loc'])).realize(ver.impl_global))
-    print(f"global v0 solved in {time.time() - t0:.1f} s, shape {out1.shape}")
+    out1 = np.asarray(TLT.construct(UNTIL(env['safe_region'], env['target_loc'])).realize(ver.impl_long))
+    print(f"long-horizon set v0 solved in {time.time() - t0:.1f} s, shape {out1.shape}")
 
-    x, y, yaw, vel = [np.asarray(c) for c in ver.impl_global.grid.coordinate_vectors]
+    x, y, yaw, vel = [np.asarray(c) for c in ver.impl_long.grid.coordinate_vectors]
     return dict(
         out1=out1.astype(np.float32),
-        t=np.asarray(ver.impl_global.timeline), x=x, y=y, yaw=yaw, vel=vel,
+        t=np.asarray(ver.impl_long.timeline), x=x, y=y, yaw=yaw, vel=vel,
         window=np.asarray(window), target_rect=np.asarray(env['target_rect']),
         target_is_goal=env['target_is_goal'], x_init=np.asarray(state),
     )
 
 
 def load_or_compute(scenario, recompute):
-    path = os.path.join(OUT_DIR, f"global0_{scenario}.npz")
+    path = os.path.join(OUT_DIR, f"long0_{scenario}.npz")
     if os.path.exists(path) and not recompute:
         print(f"Loading {path}")
         return dict(np.load(path))
     registry = {}
     config.run(registry)
-    data = compute_global0(registry)
+    data = compute_long0(registry)
     os.makedirs(OUT_DIR, exist_ok=True)
     np.savez_compressed(path, **data)
     print(f"Saved {path}")
@@ -123,7 +123,7 @@ def main():
                    help="min: min over (yaw, vel); slice: Phi at fixed --yaw, --vel")
     p.add_argument('--yaw', type=float, default=None, help="yaw [rad] for --proj slice (default: X_INIT)")
     p.add_argument('--vel', type=float, default=None, help="vel [m/s] for --proj slice (default: X_INIT)")
-    p.add_argument('--recompute', action='store_true', help="recompute global v0 even if cached")
+    p.add_argument('--recompute', action='store_true', help="recompute long-horizon set v0 even if cached")
     p.add_argument('--upsample', type=int, default=3,
                    help="linear upsampling of Phi(t, x, y) before the isosurface (smoother surface)")
     p.add_argument('--tick-size', type=int, default=17, help="font size of the axis numbers")
@@ -214,7 +214,7 @@ def main():
     )
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    base = os.path.join(OUT_DIR, f"global0_{scenario}_{args.proj}")
+    base = os.path.join(OUT_DIR, f"long0_{scenario}_{args.proj}")
     fig.write_html(base + ".html", include_plotlyjs='cdn')
     print(f"Saved {base}.html")
     try:

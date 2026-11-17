@@ -1,25 +1,25 @@
 """
-3D figure of a local set Phi_k derived from the first global set (global v0), with the
+3D figure of a short-horizon set Phi_k derived from the first long-horizon set (long-horizon set v0), with the
 moving obstacles that cross the road during its window.
 
-Local set k covers [k*T_L, k*T_L + HJ_PREDICTION] (absolute simulation time) and is computed
+Short-horizon set k covers [k*T_L, k*T_L + HJ_PREDICTION] (absolute simulation time) and is computed
 as in Verifier.run(): safe region = static safe region minus the moving obstacles of the
-window, terminal target = global v0 sliced at the end of the window (united with the global
-target). It is solved on the whole global window (crop 'none': the crop methods only restrict
-the PDE to a box that contains the set). Local sets 0 and 1 use global v0.
+window, terminal target = long-horizon set v0 sliced at the end of the window (united with the long-horizon
+target). It is solved on the whole long-horizon window (crop 'none': the crop methods only restrict
+the PDE to a box that contains the set). Short-horizon sets 0 and 1 use long-horizon set v0.
 
-As in plot_global_phi.py, the 4D state is projected onto (x, y) by the minimum over yaw and
+As in plot_long_phi.py, the 4D state is projected onto (x, y) by the minimum over yaw and
 vel (or sliced), and the zero level set is drawn in (x, y, t). The moving obstacles are drawn
 with their physical footprint as solids in (x, y, t) (slanted: they move along y).
 
 Usage:
-    python3 plots/plot_local_phi.py              # local set 1, window [1, 3] s (crossing car 1)
-    python3 plots/plot_local_phi.py --k 0        # local set 0, window [0, 2] s
-    python3 plots/plot_local_phi.py --proj slice --yaw 0 --vel 5
+    python3 plots/plot_short_phi.py              # short-horizon set 1, window [1, 3] s (crossing car 1)
+    python3 plots/plot_short_phi.py --k 0        # short-horizon set 0, window [0, 2] s
+    python3 plots/plot_short_phi.py --proj slice --yaw 0 --vel 5
 
-Outputs in results/paper/: local<k>_<scenario>.npz (cache), local<k>_<scenario>_<proj>.html
-and .pdf/.png if kaleido is installed. Needs results/paper/global0_<scenario>.npz (computed
-by plot_global_phi.py, or here if missing).
+Outputs in results/paper/: short<k>_<scenario>.npz (cache), short<k>_<scenario>_<proj>.html
+and .pdf/.png if kaleido is installed. Needs results/paper/long0_<scenario>.npz (computed
+by plot_long_phi.py, or here if missing).
 """
 import argparse
 import os
@@ -28,7 +28,7 @@ import time
 import numpy as np
 import plotly.graph_objects as go
 
-from plot_global_phi import OUT_DIR, box_edges, box_mesh, load_or_compute  # sets up jax and pyspect
+from plot_long_phi import OUT_DIR, box_edges, box_mesh, load_or_compute  # sets up jax and pyspect
 from pyspect import *  # noqa: F403
 
 import config
@@ -36,48 +36,48 @@ from obstacles import crossing_events
 from verifier import Verifier
 
 
-def compute_local(k, glob):
-    """Local set k on the window of global v0 (same construction as Verifier.run)."""
+def compute_short(k, long0):
+    """Short-horizon set k on the window of long-horizon set v0 (same construction as Verifier.run)."""
     registry = {}
     config.run(registry)
     Verifier.load_from_file = True                           # do not wipe ./sets
     Verifier.results_dir = os.path.join(OUT_DIR, "_tmp")     # do not overwrite results/crop_*.csv
     ver = Verifier(registry, None, None)
 
-    # activate global v0 (as activate_global, from the cached solution)
-    window = tuple(tuple(float(v) for v in w) for w in glob['window'])
-    for impl in (ver.impl_global, ver.impl, ver.impl_local):
+    # activate long-horizon set v0 (as activate_long, from the cached solution)
+    window = tuple(tuple(float(v) for v in w) for w in long0['window'])
+    for impl in (ver.impl_long, ver.impl, ver.impl_short):
         ver._move_window(impl, window)
-    ver.global_version, ver.global_t0, ver.window = 0, 0.0, window
+    ver.long_version, ver.long_t0, ver.window = 0, 0.0, window
     ver.env = ver.build_env(window)
     ver.target = ver.env['target_loc']
-    ver.out1 = glob['out1']
+    ver.out1 = long0['out1']
 
-    t_start = k * ver.LOCAL_PERIOD
+    t_start = k * ver.SHORT_PERIOD
     t_end = t_start + ver.T_PRED
     if t_end > ver.HORIZON + 1e-9:
-        raise ValueError(f"local window [{t_start}, {t_end}] s ends past the horizon of global v0")
+        raise ValueError(f"short-horizon window [{t_start}, {t_end}] s ends past the horizon of long-horizon set v0")
 
-    moving = ver.build_moving_object_local(t_start, ver.T_PRED)
+    moving = ver.build_moving_object_short(t_start, ver.T_PRED)
     safe = Inter(ver.env['safe_region'], Compl(moving))
-    target = ver.get_local_terminal_target(ver.out1, t_end)
-    task = UNTIL(Set(safe(ver.impl_local)), Set(target(ver.impl_local)))
+    target = ver.get_short_terminal_target(ver.out1, t_end)
+    task = UNTIL(Set(safe(ver.impl_short)), Set(target(ver.impl_short)))
 
     t0 = time.time()
-    out2 = np.asarray(TLT.construct(task).realize(ver.impl_local))
-    print(f"local set {k} [{t_start:.1f}, {t_end:.1f}] s solved in {time.time() - t0:.1f} s, shape {out2.shape}")
+    out2 = np.asarray(TLT.construct(task).realize(ver.impl_short))
+    print(f"short-horizon set {k} [{t_start:.1f}, {t_end:.1f}] s solved in {time.time() - t0:.1f} s, shape {out2.shape}")
 
-    x, y, yaw, vel = [np.asarray(c) for c in ver.impl_local.grid.coordinate_vectors]
-    return dict(out2=out2.astype(np.float32), t=t_start + np.asarray(ver.impl_local.timeline),
-                x=x, y=y, yaw=yaw, vel=vel, window=np.asarray(window), x_init=glob['x_init'])
+    x, y, yaw, vel = [np.asarray(c) for c in ver.impl_short.grid.coordinate_vectors]
+    return dict(out2=out2.astype(np.float32), t=t_start + np.asarray(ver.impl_short.timeline),
+                x=x, y=y, yaw=yaw, vel=vel, window=np.asarray(window), x_init=long0['x_init'])
 
 
-def load_or_compute_local(scenario, k, recompute):
-    path = os.path.join(OUT_DIR, f"local{k}_{scenario}.npz")
+def load_or_compute_short(scenario, k, recompute):
+    path = os.path.join(OUT_DIR, f"short{k}_{scenario}.npz")
     if os.path.exists(path) and not recompute:
         print(f"Loading {path}")
         return dict(np.load(path))
-    data = compute_local(k, load_or_compute(scenario, False))
+    data = compute_short(k, load_or_compute(scenario, False))
     np.savez_compressed(path, **data)
     print(f"Saved {path}")
     return data
@@ -116,15 +116,15 @@ def moving_obstacle_solids(t0, t1, window, n=80):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--k', type=int, default=1, help="local set index (window [k*T_L, k*T_L + T_PRED])")
+    p.add_argument('--k', type=int, default=1, help="short-horizon set index (window [k*T_L, k*T_L + T_PRED])")
     p.add_argument('--proj', choices=('min', 'slice'), default='min',
                    help="min: min over (yaw, vel); slice: Phi at fixed --yaw, --vel")
     p.add_argument('--yaw', type=float, default=None, help="yaw [rad] for --proj slice (default: X_INIT)")
     p.add_argument('--vel', type=float, default=None, help="vel [m/s] for --proj slice (default: X_INIT)")
-    p.add_argument('--recompute', action='store_true', help="recompute the local set even if cached")
+    p.add_argument('--recompute', action='store_true', help="recompute the short-horizon set even if cached")
     p.add_argument('--eye', type=float, nargs=3, default=(-0.9, -1.9, 1.6), metavar=('X', 'Y', 'Z'),
-                   help="camera position (plotly scene units); default: same view as plot_global_phi.py")
-    p.add_argument('--out', default=None, help="output base name (default: local<k>_<scenario>_<proj>)")
+                   help="camera position (plotly scene units); default: same view as plot_long_phi.py")
+    p.add_argument('--out', default=None, help="output base name (default: short<k>_<scenario>_<proj>)")
     p.add_argument('--dynamic', action=argparse.BooleanOptionalAction, default=True,
                    help="draw the moving obstacles of the window (--no-dynamic to hide them)")
     p.add_argument('--upsample', type=int, default=3,
@@ -136,7 +136,7 @@ def main():
     args = p.parse_args()
 
     scenario = config.SCENARIO
-    d = load_or_compute_local(scenario, args.k, args.recompute)
+    d = load_or_compute_short(scenario, args.k, args.recompute)
     out2, t, x, y = d['out2'], d['t'], d['x'], d['y']
     (wx0, wx1), (wy0, wy1) = d['window']
     t0, t1 = float(t[0]), float(t[-1])
@@ -209,13 +209,13 @@ def main():
         scene=dict(
             xaxis=dict(axis, linecolor='#1f92e4', linewidth=20, title=dict(text='<i>x</i> [m]', font=tfont), range=[wx0, wx1]),
             yaxis=dict(axis, linecolor='#1f92e4', linewidth=20, title=dict(text='<i>y</i> [m]', font=tfont), tickvals=[0, 2, 4, 6], range=[wy0, wy1]),
-            zaxis=dict(axis, title=dict(text='<i>t</i> [s]', font=tfont), range=[0, config.HJ_HORIZON]),   # same as the global figure
+            zaxis=dict(axis, title=dict(text='<i>t</i> [s]', font=tfont), range=[0, config.HJ_HORIZON]),   # same as the long-horizon figure
             aspectmode='manual', aspectratio=ar,
             camera=dict(eye=dict(zip('xyz', args.eye)), center=dict(x=0.05, y=0, z=-0.3)),
         ),
     )
 
-    base = args.out or os.path.join(OUT_DIR, f"local{args.k}_{scenario}_{args.proj}")
+    base = args.out or os.path.join(OUT_DIR, f"short{args.k}_{scenario}_{args.proj}")
     fig.write_html(base + ".html", include_plotlyjs='cdn')
     print(f"Saved {base}.html")
     try:

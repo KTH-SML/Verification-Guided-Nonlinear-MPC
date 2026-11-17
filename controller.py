@@ -33,7 +33,7 @@ def get_input(name, seq=None):
 # Diagonal quadratic surrogates around xbar_k, for two grid functions:
 #   hat(F)_k(x) = a_k + g_k^T (x - xbar_k) + 0.5 * hdiag_k ⊙ (x - xbar_k)^2
 #   - progress: time-to-reach map TTR(x)        -> cost
-#   - safety:   local HJ value function V(t, x) -> constraint V <= -margin
+#   - safety:   short-horizon HJ value function V(t, x) -> constraint V <= -margin
 #
 # Parameter layout per stage:
 #   [xbar(4), a(1), g(4), hdiag(4), sa(1), sg(4), shdiag(4)]  =>  NP = 22
@@ -90,7 +90,7 @@ class Controller:
         # yaw is periodic on the hj_reachability grid: N nodes at -pi + k*2pi/N, +pi excluded
         self.HJ_GRID_DX[2] = (self.HJ_GRID_MAX[2] - self.HJ_GRID_MIN[2]) / self.HJ_GRID_STP[2]
 
-        # Spatial grids for direct indexing. x, y follow the global window the value
+        # Spatial grids for direct indexing. x, y follow the long-horizon window the value
         # function was computed on (see _window_grids); these are the config defaults.
         self.spatial_grids = [
             np.linspace(self.HJ_GRID_MIN[i], self.HJ_GRID_MAX[i], self.HJ_GRID_STP[i])
@@ -247,13 +247,13 @@ class Controller:
 
     def update_progress_map(self, version=None):
         """
-        Load the time-to-reach map of global window `version` (default: the latest one),
+        Load the time-to-reach map of long-horizon window `version` (default: the latest one),
         if it is not the one in use.
 
-        The cost (TTR) and the safety constraint (local V) must refer to the same global
-        problem: the local set is computed towards the target of the global window it was
-        derived from, so the progress map is switched together with the local set
-        (see update_current_valuefunc), not as soon as a new global window is published.
+        The cost (TTR) and the safety constraint (short-horizon V) must refer to the same long-horizon
+        problem: the short-horizon set is computed towards the target of the long-horizon window it was
+        derived from, so the progress map is switched together with the short-horizon set
+        (see update_current_valuefunc), not as soon as a new long-horizon window is published.
         """
         pinfo = self.registry.get('progress.info', None)
         if pinfo is None:
@@ -275,13 +275,13 @@ class Controller:
         # Time-invariant map: two identical time slices let _query_vf interpolate it.
         self.ttr_vf = np.stack([ttr, ttr])
         self.ttr_time_grid = np.array([0.0, self.config['verifier']['horizon']])
-        # the window of every version is recorded in the global timeline
-        window = next((g['window'] for g in self.registry.get('verifier.global_timeline', [])
+        # the window of every version is recorded in the long-horizon timeline
+        window = next((g['window'] for g in self.registry.get('verifier.long_timeline', [])
                        if g['version'] == version), pinfo['window'])
         self.ttr_grids = self._window_grids(window)
         self.ttr_version = version
         (x_lo, x_hi), _ = window
-        log("MPC", f"progress map -> global v{self.ttr_version} (window x [{x_lo:5.2f}, {x_hi:5.2f}])",
+        log("MPC", f"progress map -> long-horizon set v{self.ttr_version} (window x [{x_lo:5.2f}, {x_hi:5.2f}])",
             self.registry.get('time'))
 
     def update_current_valuefunc(self, time, state):
@@ -306,7 +306,7 @@ class Controller:
             if t_start <= time:
                 late = f", EXPIRED {time - t_end:.2f} s ago" if time > t_end else f", {t_end - time:4.2f} s left"
                 log("MPC", f"safety set -> s{current_set_name.removeprefix('set_')} "
-                           f"[{t_start:5.2f}, {t_end:5.2f}] s (global v{info.get('global_version')}){late}", time)
+                           f"[{t_start:5.2f}, {t_end:5.2f}] s (long-horizon set v{info.get('long_version')}){late}", time)
 
                 self.current_loaded_set_name = current_set_name
                 self.latest_info = dict(info)
@@ -323,8 +323,8 @@ class Controller:
                 HJ_NT = self.latest_vf.shape[0]
                 self.vf_time_grid = t_start + np.arange(HJ_NT) * self.HJ_TIMESTEP
 
-                # progress map of the same global window the local set was derived from
-                self.update_progress_map(info.get('global_version'))
+                # progress map of the same long-horizon window the short-horizon set was derived from
+                self.update_progress_map(info.get('long_version'))
 
     def _current_set_idx(self) -> int:
         """Return the set_idx of the currently active verification set, or -1 if unknown."""
@@ -633,7 +633,7 @@ class Controller:
         interp_cost = []
         state_cost  = []
 
-        # Timeline: set_idx of the safety set and global version of the progress (TTR) map
+        # Timeline: set_idx of the safety set and long-horizon version of the progress (TTR) map
         # used at each MPC step (index k -> step k)
         used_sets: list = []
         used_ttr: list = []
@@ -643,8 +643,8 @@ class Controller:
                 return
             tm.sleep(0.1)
 
-        # Time-to-reach map of the first global window (published before the first set);
-        # then switched by update_current_valuefunc together with the local set.
+        # Time-to-reach map of the first long-horizon window (published before the first set);
+        # then switched by update_current_valuefunc together with the short-horizon set.
         self.update_progress_map()
         number_of_steps = int(self.config['mission_time'] / self.TIMESTEP)
 

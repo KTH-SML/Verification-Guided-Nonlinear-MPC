@@ -28,7 +28,7 @@ class Animation:
         self.HJ_GRID_STP = [axis['points'] for axis in self.config['verifier']['axes'] if axis['name'] != 't']
 
         self.OBSTACLES = self.config['obstacles']
-        # Whole map extent (the value functions only cover the global window)
+        # Whole map extent (the value functions only cover the long-horizon window)
         self.MAP_X = (self.config['X0'], self.config['X0'] + self.config['XW'])
         self.MAP_Y = (self.config['Y0'], self.config['Y0'] + self.config['YW'])
         self.DYN_OBS = self.config['dynamic_obstacles']
@@ -71,7 +71,7 @@ class Animation:
         return int(np.argmin(np.abs(grid - value)))
 
 
-    def animate_heat_map_global(
+    def animate_heat_map(
         self,
         verifier_timeline,
         used_sets,
@@ -82,7 +82,7 @@ class Animation:
         save_name=None,
         obstacles=None,
         interval_ms=100,
-        global_timeline=None,
+        long_timeline=None,
     ):
         """
         Animate:
@@ -90,7 +90,7 @@ class Animation:
         2) gradient slope per stage (True V vs linear surrogate along horizon)
         3) real VF slice in (yaw, vel)
         4) time vs HJ cost
-        5) local zoom: current point + predicted trajectory + -∇V arrows
+        5) zoom: current point + predicted trajectory + -∇V arrows
  
         Parameters
         ----------
@@ -114,8 +114,8 @@ class Animation:
             List of rectangles (ox, oy, ow, oh)
         interval_ms : int
             Animation frame interval in ms
-        global_timeline : list or None
-            One entry per global window ({window, target, sim_time_end, ...}),
+        long_timeline : list or None
+            One entry per long-horizon window ({window, target, sim_time_end, ...}),
             drawn on the map panel from the moment it became available.
         """
         real_path = np.asarray(real_path, dtype=float)
@@ -141,7 +141,7 @@ class Animation:
         ])
  
         def _window_xy(entry):
-            """x, y grids of the set in `entry`: it lives on its global window."""
+            """x, y grids of the set in `entry`: it lives on its long-horizon window."""
             win = entry.get('window')
             if win is None:
                 return x_grid, y_grid
@@ -176,8 +176,8 @@ class Animation:
         # layout: full-width map (top), three panels (middle), full-width cost (bottom)
         fig = plt.figure(figsize=(22, 17))
         gs = fig.add_gridspec(3, 3, height_ratios=[1.2, 1.0, 0.7])
-        ax1 = fig.add_subplot(gs[0, :])   # whole map + global window + XY value function
-        ax5 = fig.add_subplot(gs[1, 0])   # local zoom + -∇V arrows
+        ax1 = fig.add_subplot(gs[0, :])   # whole map + long-horizon window + XY value function
+        ax5 = fig.add_subplot(gs[1, 0])   # zoom + -∇V arrows
         ax2 = fig.add_subplot(gs[1, 1])   # gradient slope per stage
         ax3 = fig.add_subplot(gs[1, 2])   # yaw-vel
         ax4 = fig.add_subplot(gs[2, :])   # cost over time
@@ -201,7 +201,7 @@ class Animation:
         # ------------------------------------------------------------------
         # Helper: draw obstacle rectangles
         # ------------------------------------------------------------------
-        def _draw_obstacles_local(ax):
+        def _draw_obstacles_zoom(ax):
             for ox, oy, ow, oh in obstacles:
                 ax.add_patch(
                     plt.Rectangle(
@@ -235,25 +235,25 @@ class Animation:
                     first = False
 
         # ------------------------------------------------------------------
-        # Helper: global window active at time t (the latest one that has started,
+        # Helper: long-horizon window active at time t (the latest one that has started,
         # i.e. t >= t0, and is available by t)
         # ------------------------------------------------------------------
-        def _draw_global_window(ax, t):
-            if not global_timeline:
+        def _draw_long_window(ax, t):
+            if not long_timeline:
                 return
-            active = [g for g in global_timeline if max(g['t0'], g['sim_time_end']) <= t + 1e-9]
-            g = active[-1] if active else global_timeline[0]
+            active = [g for g in long_timeline if max(g['t0'], g['sim_time_end']) <= t + 1e-9]
+            g = active[-1] if active else long_timeline[0]
             (wx0, wx1), (wy0, wy1) = g['window']
             ax.add_patch(plt.Rectangle(
                 (wx0, wy0), wx1 - wx0, wy1 - wy0,
                 fill=False, edgecolor="yellow", linestyle="--", linewidth=2.0,
-                zorder=8, label=f"global window v{g['version']}",
+                zorder=8, label=f"long-horizon window v{g['version']}",
             ))
             tx, ty, tw, th = g['target']
             ax.add_patch(plt.Rectangle(
                 (tx, ty), tw, th,
                 facecolor="lime", edgecolor="lime", alpha=0.35, linewidth=1.5,
-                zorder=8, label="goal" if g['target_is_goal'] else "global target",
+                zorder=8, label="goal" if g['target_is_goal'] else "long-horizon target",
             ))
 
         # ------------------------------------------------------------------
@@ -353,7 +353,7 @@ class Animation:
             if zmin < 0 < zmax:
                 ax.contour(x_grid, y_grid, Z.T,
                            levels=[0.0], colors="red", linewidths=2.0)
-            _draw_obstacles_local(ax)
+            _draw_obstacles_zoom(ax)
             _draw_dynamic_obstacle(ax, t)
             ax.set_xlim(x_lim)
             ax.set_ylim(y_lim)
@@ -363,18 +363,18 @@ class Animation:
         # ------------------------------------------------------------------
         # Panel 1: raw XY + real path + prediction + -∇V arrows
         # ------------------------------------------------------------------
-        global_xy_cache = {}
+        long_xy_cache = {}
 
-        def _draw_global_zero_level(ax, t):
-            """Zero level of the global set the current local set was derived from, at time t
-            (min over yaw, vel): the local set is contained in it."""
-            version = verifier_timeline[current_set_idx].get('global_version')
-            g = next((g for g in (global_timeline or []) if g['version'] == version), None)
+        def _draw_long_zero_level(ax, t):
+            """Zero level of the long-horizon set the current short-horizon set was derived from, at time t
+            (min over yaw, vel): the short-horizon set is contained in it."""
+            version = verifier_timeline[current_set_idx].get('long_version')
+            g = next((g for g in (long_timeline or []) if g['version'] == version), None)
             if g is None or 'xy_path' not in g:
                 return
-            if version not in global_xy_cache:
-                global_xy_cache[version] = np.load(g['xy_path'])
-            Zg_all = global_xy_cache[version]
+            if version not in long_xy_cache:
+                long_xy_cache[version] = np.load(g['xy_path'])
+            Zg_all = long_xy_cache[version]
             ig = int(np.clip(round((t - g['t0']) / self.HJ_TIMESTEP), 0, Zg_all.shape[0] - 1))
             Zg = Zg_all[ig]
             if not (Zg.min() < 0 < Zg.max()):
@@ -385,10 +385,10 @@ class Animation:
                             linestyles="--", linewidths=1.5, zorder=5)
             cs.set(path_effects=outline)
             ax.plot([], [], color="white", linestyle="--", linewidth=1.5,
-                    path_effects=outline, label=f"global V=0 (v{version})")
+                    path_effects=outline, label=f"long-horizon V=0 (v{version})")
 
         def _current_crop():
-            """PDE box of the local set in use: [(lo, hi)] for x, y, yaw, vel, or None."""
+            """PDE box of the short-horizon set in use: [(lo, hi)] for x, y, yaw, vel, or None."""
             entry = verifier_timeline[current_set_idx]
             return entry.get('crop'), entry.get('crop_pct')
 
@@ -420,10 +420,10 @@ class Animation:
         def _plot_xy_panel(ax, Z, title, t, x, y, yaw, pred, it_):
             # whole map; the value function only covers the window of the current set
             _plot_xy_base(ax, Z, self.MAP_X, self.MAP_Y, t)
-            _draw_global_window(ax, t)
-            _draw_global_zero_level(ax, t)
+            _draw_long_window(ax, t)
+            _draw_long_zero_level(ax, t)
             _draw_crop_box_xy(ax)
-            ax.plot([], [], color="red", linewidth=2.0, label="local V=0")
+            ax.plot([], [], color="red", linewidth=2.0, label="short-horizon V=0")
  
             ax.plot(
                 real_path[:frame_idx + 1, 1],
@@ -557,9 +557,9 @@ class Animation:
             _legend_below(ax)
  
         # ------------------------------------------------------------------
-        # Panel 5: local zoom + -∇V arrows
+        # Panel 5: zoom + -∇V arrows
         # ------------------------------------------------------------------
-        def _plot_local_panel(ax, Z, t, x, y, yaw, pred, it_):
+        def _plot_zoom_panel(ax, Z, t, x, y, yaw, pred, it_):
             window = 0.3 * self.SCALE
             lx_min, lx_max = x - window, x + window
             ly_min, ly_max = y - window, y + window
@@ -596,10 +596,10 @@ class Animation:
         # ------------------------------------------------------------------
         # Update function
         # ------------------------------------------------------------------
-        def update(frame_idx_local):
+        def update(frame_arg):
             nonlocal frame_idx, current_set_idx, vf, vf_time_grid, t0_vf
             nonlocal x_grid, y_grid, x_min, x_max, y_min, y_max
-            frame_idx = frame_idx_local
+            frame_idx = frame_arg
 
             sid = used_sets[frame_idx] if frame_idx < len(used_sets) else used_sets[-1]
             if sid != current_set_idx:
@@ -679,9 +679,9 @@ class Animation:
                 ax4.set_ylim(-2, 2)
  
             # ----------------------------------------------------------------
-            # 5) Local zoom: current point + -∇V arrows
+            # 5) Zoom: current point + -∇V arrows
             # ----------------------------------------------------------------
-            _plot_local_panel(ax5, Z_xy_proj, t, x, y, yaw, pred, it)
+            _plot_zoom_panel(ax5, Z_xy_proj, t, x, y, yaw, pred, it)
  
             fig.suptitle(f"t = {t:.2f}", fontsize=14)
             fig.tight_layout()
@@ -712,31 +712,31 @@ class Animation:
     
     def plot_timeline(self, save_path: str = "timeline.png") -> None:
         """
-        Timeline of the global loop, the local loop and the MPC, on one simulation-time axis.
+        Timeline of the long-horizon loop, the short-horizon loop and the MPC, on one simulation-time axis.
 
         Lanes (top to bottom)
-            Global loop   compute   when each global window was computed (labelled vN)
-                          horizons  the time interval each global set covers, [t0, t0 + HJ_HORIZON],
+            Long-horizon loop   compute   when each long-horizon window was computed (labelled vN)
+                          horizons  the time interval each long-horizon set covers, [t0, t0 + HJ_HORIZON],
                                     with its spatial window and target
-            Local loop    compute   when each local set was computed (labelled sN)
-                          horizons  the time interval each local set covers
-            MPC           TTR map   which global window the progress (TTR) cost refers to
-                          set used  which local set the controller was using
-        Dashed vertical lines mark the moment each new global window becomes available.
+            Short-horizon loop    compute   when each short-horizon set was computed (labelled sN)
+                          horizons  the time interval each short-horizon set covers
+            MPC           TTR map   which long-horizon window the progress (TTR) cost refers to
+                          set used  which short-horizon set the controller was using
+        Dashed vertical lines mark the moment each new long-horizon window becomes available.
 
         Registry keys consumed
-            verifier.global_timeline : one entry per global window
+            verifier.long_timeline : one entry per long-horizon window
                 {version, t0, window, target_is_goal, compute_start, compute_end, sim_time_end}
-            verifier.timeline : one entry per local set
-                {set_idx, interval, compute_start, compute_end, sim_start, sim_end, global_version}
+            verifier.timeline : one entry per short-horizon set
+                {set_idx, interval, compute_start, compute_end, sim_start, sim_end, long_version}
             controller.timeline : {mpc_dt, used_sets, used_ttr}
-                (used_sets[k]: set_idx, used_ttr[k]: global version of the TTR map at MPC step k)
+                (used_sets[k]: set_idx, used_ttr[k]: long-horizon version of the TTR map at MPC step k)
             mission.done (optional) : {time, ...}
         """
         import matplotlib.patches as mpatches
         import matplotlib.colors as mcolors
 
-        gtl = self.registry.get('verifier.global_timeline', [])
+        gtl = self.registry.get('verifier.long_timeline', [])
         vtl = self.registry.get('verifier.timeline', [])
         ctl = self.registry.get('controller.timeline', {})
         done = self.registry.get('mission.done', None)
@@ -745,7 +745,7 @@ class Animation:
             return
 
         # Palette (validated categorical slots 1-3, light mode) and text/grid tokens
-        C_GLOBAL, C_LOCAL, C_MPC = "#2a78d6", "#eb6834", "#1baf7a"
+        C_LONG, C_SHORT, C_MPC = "#2a78d6", "#eb6834", "#1baf7a"
         INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#d9d8d4", "#fcfcfb"
 
         def tint(hex_color, a=0.30):
@@ -760,16 +760,16 @@ class Animation:
             t_end = min(t_end, done['time'])
         t_max = max(t_end, max(e['interval'][1] for e in vtl))
 
-        H_GLOBAL = self.config['verifier']['horizon']
+        H_LONG = self.config['verifier']['horizon']
 
-        # Global horizons overlap by more than two at a time when HJ_HORIZON > 2 * the update
+        # Long-horizon sets overlap by more than two at a time when HJ_HORIZON > 2 * the update
         # period: each one goes on the first sub-row that is free at its start.
         g_row, row_end = [], []
         for g in gtl:
             r = next((i for i, e in enumerate(row_end) if e <= g['t0'] + 1e-9), len(row_end))
             if r == len(row_end):
                 row_end.append(0.0)
-            row_end[r] = g['t0'] + H_GLOBAL
+            row_end[r] = g['t0'] + H_LONG
             g_row.append(r)
         n_g_rows = max(len(row_end), 1)
 
@@ -812,32 +812,32 @@ class Animation:
                 ax.text(t0, y + h / 2 + 0.04, label, ha="left", va="bottom",
                         fontsize=7, color=INK, zorder=4, clip_on=True)
 
-        # --- Global loop -------------------------------------------------
+        # --- Long-horizon loop -------------------------------------------------
         for k, g in enumerate(gtl):
             # computed in advance (background thread), used from its window start t0
-            bar(g.get('sim_time_start', g['t0']), g['sim_time_end'], LANES['g_comp'], C_GLOBAL,
+            bar(g.get('sim_time_start', g['t0']), g['sim_time_end'], LANES['g_comp'], C_LONG,
                 label=f"v{g['version']}", label_above=True)
             t_on = max(g['t0'], g['sim_time_end'])
             (x0, x1), _ = g['window']
             tgt = "GOAL" if g['target_is_goal'] else "band"
             space = f"x∈[{x0:.1f}, {x1:.1f}] → {tgt}"
-            # time interval covered by the global set (may extend past the plot: clipped),
+            # time interval covered by the long-horizon set (may extend past the plot: clipped),
             # with the spatial window it considers and its target
-            h0, h1 = g['t0'], g['t0'] + H_GLOBAL
+            h0, h1 = g['t0'], g['t0'] + H_LONG
             t_txt = f"[{h0:.1f}, {h1:.1f}] s" if h1 <= t_max else f"→ {h1:.1f} s"
-            bar(h0, min(h1, t_max), LANES['g_hor'][g_row[k]], tint(C_GLOBAL), edge=C_GLOBAL, h=0.5,
+            bar(h0, min(h1, t_max), LANES['g_hor'][g_row[k]], tint(C_LONG), edge=C_LONG, h=0.5,
                 label=f"v{g['version']}  {t_txt}   {space}")
-            # global window starts being used by the local sets: dashed line across all lanes
+            # long-horizon window starts being used by the short-horizon sets: dashed line across all lanes
             ax.axvline(t_on, color=INK2, lw=0.8, ls=(0, (4, 3)), zorder=1)
 
-        # --- Local loop --------------------------------------------------
+        # --- Short-horizon loop --------------------------------------------------
         for e in vtl:
             k = e['set_idx']
             s0 = e.get('sim_start', e['interval'][0])
             s1 = e.get('sim_end', s0)
-            bar(s0, s1, LANES['l_comp'], C_LOCAL, label=f"s{k}", label_above=True)
+            bar(s0, s1, LANES['l_comp'], C_SHORT, label=f"s{k}", label_above=True)
             h0, h1 = e['interval']
-            bar(h0, h1, LANES['l_hor'][k % 2], tint(C_LOCAL), edge=C_LOCAL, h=0.5, label=f"s{k}")
+            bar(h0, h1, LANES['l_hor'][k % 2], tint(C_SHORT), edge=C_SHORT, h=0.5, label=f"s{k}")
 
         # --- MPC: consecutive steps with the same set / map -> one segment
         def segments(values):
@@ -850,16 +850,16 @@ class Animation:
         for sid, a, b in segments(used_sets):
             bar(a, b, LANES['mpc'], C_MPC, h=0.5, label=f"s{sid}" if sid >= 0 else "-")
 
-        # progress map: global version of the TTR cost, and the global of the set in use
+        # progress map: long-horizon version of the TTR cost, and the long-horizon set the set in use was derived from
         # (they coincide by construction; a mismatch is drawn in red)
         used_ttr = list(ctl.get('used_ttr', []))
-        set_gv = {e['set_idx']: e.get('global_version') for e in vtl}
+        set_gv = {e['set_idx']: e.get('long_version') for e in vtl}
         for k, (v, a, b) in enumerate(segments(used_ttr)):
             if v < 0:
                 continue
             steps = range(int(round(a / mpc_dt)), int(round(b / mpc_dt)))
             mismatch = any(set_gv.get(used_sets[i]) not in (None, v) for i in steps if i < len(used_sets))
-            bar(a, b, LANES['mpc_ttr'], tint(C_GLOBAL), edge="#d03b3b" if mismatch else C_GLOBAL, h=0.5,
+            bar(a, b, LANES['mpc_ttr'], tint(C_LONG), edge="#d03b3b" if mismatch else C_LONG, h=0.5,
                 label=f"TTR v{v}" + ("  ≠ set" if mismatch else ""))
 
         if done is not None:
@@ -871,11 +871,11 @@ class Animation:
         ax.set_ylim(0.2, y_top)
         ax.set_yticks([LANES['g_comp'], float(np.mean(LANES['g_hor'])),
                        LANES['l_comp'], sum(LANES['l_hor']) / 2, LANES['mpc_ttr'], LANES['mpc']])
-        ax.set_yticklabels(["Global loop · compute",
-                            "Global loop · set horizons",
-                            "Local loop · compute", "Local loop · set horizons",
+        ax.set_yticklabels(["Long-horizon loop · compute",
+                            "Long-horizon loop · set horizons",
+                            "Short-horizon loop · compute", "Short-horizon loop · set horizons",
                             "MPC · progress map (TTR)", "MPC · set in use"], fontsize=9, color=INK)
-        for sep in (5.2, 2.0):   # separate global / local / MPC groups
+        for sep in (5.2, 2.0):   # separate long-horizon / short-horizon / MPC groups
             ax.axhline(sep, color=GRID, lw=1.0, zorder=0)
         tick = 1.0 if t_max <= 20 else 2.0 if t_max <= 40 else 5.0
         ax.set_xticks(np.arange(0, t_max + 1e-9, tick))
@@ -890,15 +890,15 @@ class Animation:
         def stats(entries, a, b):
             d = [x[b] - x[a] for x in entries]
             return f"mean {np.mean(d):.2f} s, max {np.max(d):.2f} s" if d else "n/a"
-        # overlap of consecutive global horizons vs the time span of one local set
-        overlaps = [g['t0'] + H_GLOBAL - n['t0'] for g, n in zip(gtl, gtl[1:])]
-        local_span = self.config['verifier'].get('t_delay', 0.0) + self.T_PRED
-        overlap_txt = (f"min global overlap {min(overlaps):.2f} s (local set needs {local_span:.2f} s)"
+        # overlap of consecutive long-horizon sets vs the time span of one short-horizon set
+        overlaps = [g['t0'] + H_LONG - n['t0'] for g, n in zip(gtl, gtl[1:])]
+        short_span = self.config['verifier'].get('t_delay', 0.0) + self.T_PRED
+        overlap_txt = (f"min long-horizon overlap {min(overlaps):.2f} s (short-horizon set needs {short_span:.2f} s)"
                        if overlaps else "")
-        summary = (f"{len(gtl)} global windows (compute {stats(gtl, 'compute_start', 'compute_end')})   ·   "
-                   f"{len(vtl)} local sets (compute {stats(vtl, 'compute_start', 'compute_end')})"
+        summary = (f"{len(gtl)} long-horizon windows (compute {stats(gtl, 'compute_start', 'compute_end')})   ·   "
+                   f"{len(vtl)} short-horizon sets (compute {stats(vtl, 'compute_start', 'compute_end')})"
                    + (f"   ·   {overlap_txt}" if overlap_txt else ""))
-        ax.set_title("Global loop, local loop and MPC timeline", loc="left",
+        ax.set_title("Long-horizon loop, short-horizon loop and MPC timeline", loc="left",
                      fontsize=12, fontweight="bold", color=INK, pad=22)
         ax.text(0, 1.02, summary + "   ·   compute times are wall-clock",
                 transform=ax.transAxes, fontsize=8.5, color=INK2, va="bottom")
@@ -914,8 +914,8 @@ class Animation:
         results = self.registry.get('results', {})
         data = {
             'config':          dict(self.config),
-            'global_timeline': list(self.registry.get('verifier.global_timeline', [])),
-            'local_timeline':  list(self.registry.get('verifier.timeline', [])),
+            'long_timeline': list(self.registry.get('verifier.long_timeline', [])),
+            'short_timeline':  list(self.registry.get('verifier.timeline', [])),
             'controller':      dict(self.registry.get('controller.timeline', {})),
             'mission_done':    self.registry.get('mission.done', None),
             'real_path':       np.asarray(results.get('real_path', []), dtype=float),
@@ -925,14 +925,14 @@ class Animation:
             'pred_path':       np.asarray(results.get('pred_path', []), dtype=float),
         }
         # (x, y) projection of every short-horizon set, min over (yaw, vel), shape (T, nx, ny),
-        # on the grid of its global window (snapshot figures, plot_snapshots.py). The full
+        # on the grid of its long-horizon window (snapshot figures, plot_snapshots.py). The full
         # sets in ./sets are deleted by the next run.
-        local_xy = {}
-        for e in data['local_timeline']:
+        short_xy = {}
+        for e in data['short_timeline']:
             p = e.get('path')
             if p and os.path.exists(p):
-                local_xy[e['set_idx']] = np.load(p).min(axis=(3, 4)).astype(np.float32)
-        data['local_xy'] = local_xy
+                short_xy[e['set_idx']] = np.load(p).min(axis=(3, 4)).astype(np.float32)
+        data['short_xy'] = short_xy
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             pickle.dump(data, f)
@@ -954,7 +954,7 @@ class Animation:
 
         self.save_run_data()
 
-        self.animate_heat_map_global(
+        self.animate_heat_map(
             verifier_timeline=verifier_timeline,
             used_sets=used_sets,
             real_path=results["real_path"],
@@ -965,7 +965,7 @@ class Animation:
             save_name="vf_debug",
             obstacles=self.OBSTACLES,
             interval_ms=100,
-            global_timeline=self.registry.get('verifier.global_timeline', []),
+            long_timeline=self.registry.get('verifier.long_timeline', []),
         )
 
         self.plot_timeline(save_path="timeline.png")

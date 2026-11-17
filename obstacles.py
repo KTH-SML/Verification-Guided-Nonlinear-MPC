@@ -17,11 +17,11 @@ def crossing_events(dyn_obs):
     leaves it completely at t_exit (its back edge past the far side). Outside
     [t_enter, t_exit] it lies entirely outside the band.
 
-    Both edges are straight lines in (y, t), in global time:
+    Both edges are straight lines in (y, t), in simulation time:
         y_lo(t) = y_lo0 + v * (t - t_enter)
         y_hi(t) = y_hi0 + v * (t - t_enter)
 
-    Shared by Verifier.build_moving_object_local (implicit sets) and the
+    Shared by Verifier.build_moving_object_short (implicit sets) and the
     animation (rectangles) so both use the exact same obstacle model.
 
     Yields
@@ -49,7 +49,7 @@ def crossing_events(dyn_obs):
 def obstacle_rects(t, dyn_obs):
     """
     Rectangles (x_min, y_min, width, height) occupied by one moving obstacle
-    at global time t, clipped to its band between_y.
+    at simulation time t, clipped to its band between_y.
     """
     y_bot, y_top = dyn_obs['between_y']
     rects = []

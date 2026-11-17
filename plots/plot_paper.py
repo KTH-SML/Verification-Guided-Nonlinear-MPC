@@ -49,7 +49,7 @@ def tint(hex_color, a=0.28):
 # ----------------------------------------------------------------------
 def plot_value(data, out, width=7.0, height=2.0, fs=10):
     dt = data['config']['controller']['timestep']
-    # V of the active local set at the vehicle's full state (x, y, yaw, vel), whatever
+    # V of the active short-horizon set at the vehicle's full state (x, y, yaw, vel), whatever
     # SAFETY_V_MODE the MPC constraint uses. Runs saved before 'state_cost' was recorded
     # only have the value used by the MPC ('real_cost').
     V = np.asarray(data.get('state_cost', []), dtype=float)
@@ -105,13 +105,13 @@ def _rows(items):
 def plot_schedule(data, out, t_max=10.0, width=7.0, fs=8):
     cfg = data['config']
     H_LONG = cfg['verifier']['horizon']
-    gtl = [g for g in data['global_timeline'] if g.get('sim_time_start', g['t0']) < t_max]
-    ltl = [e for e in data['local_timeline']
+    gtl = [g for g in data['long_timeline'] if g.get('sim_time_start', g['t0']) < t_max]
+    ltl = [e for e in data['short_timeline']
            if e.get('sim_start', e['interval'][0]) < t_max]
     mpc_dt = data['controller']['mpc_dt']
     used = list(data['controller']['used_sets'])
     used_ttr = list(data['controller'].get('used_ttr', []))
-    set_gv = {e['set_idx']: e.get('global_version') for e in data['local_timeline']}
+    set_gv = {e['set_idx']: e.get('long_version') for e in data['short_timeline']}
 
     # one row per long-horizon set; short-horizon sets share rows (the next one goes
     # on a row whose previous set has ended, so each row reads left to right)
@@ -188,7 +188,7 @@ def plot_schedule(data, out, t_max=10.0, width=7.0, fs=8):
         yc = y_l[r]
         c0, c1 = e.get('sim_start', e['interval'][0]), e.get('sim_end', e['interval'][0])
         h0, h1 = e['interval']
-        gv = e.get('global_version')
+        gv = e.get('long_version')
         name = fr"${SYM_SHORT}_{{{e['set_idx']}}}$"
         bar(h0, h1, yc, tint(C_SHORT), edge=C_SHORT)
         if c1 - c0 > 1e-6:   # zero length: computed before the run starts (L0, S0), not drawn

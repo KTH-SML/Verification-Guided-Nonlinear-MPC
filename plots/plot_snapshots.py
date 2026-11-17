@@ -75,9 +75,9 @@ def time_label(ax, t, fs):
 
 
 def active_window(data, t):
-    """Long-horizon (global) set in use at time t, as in the animation: the latest one
+    """Long-horizon set in use at time t, as in the animation: the latest one
     that has started (t >= t0) and is available (computed) by t."""
-    gtl = data.get("global_timeline") or []
+    gtl = data.get("long_timeline") or []
     if not gtl:
         return None
     active = [g for g in gtl if max(g["t0"], g.get("sim_time_end", g["t0"])) <= t + 1e-9]
@@ -107,9 +107,9 @@ def draw_snapshot(ax, data, t_query, k_scale, fs):
                                lw=1.0 * k_scale, zorder=4))
     # the window S^(j) the short-horizon set in use was computed from (the set lives on its
     # grid, so it is always inside it); fallback: the latest window available at time t
-    entry = next(e for e in data["local_timeline"] if e["set_idx"] == used[k])
-    g = next((g for g in data.get("global_timeline") or []
-              if g["version"] == entry.get("global_version")), None) or active_window(data, t)
+    entry = next(e for e in data["short_timeline"] if e["set_idx"] == used[k])
+    g = next((g for g in data.get("long_timeline") or []
+              if g["version"] == entry.get("long_version")), None) or active_window(data, t)
     if g is not None:
         (wx0, wx1), (wy0, wy1) = g["window"]
         ax.add_patch(plt.Rectangle((wx0, wy0), wx1 - wx0, wy1 - wy0, fill=False, edgecolor=C_WIN,
@@ -119,7 +119,7 @@ def draw_snapshot(ax, data, t_query, k_scale, fs):
                                    lw=1.0 * k_scale, zorder=4.5))
 
     # border of the short-horizon set in use at step k (min over yaw, vel)
-    Z_all = data["local_xy"][used[k]]
+    Z_all = data["short_xy"][used[k]]
     hj_dt = cfg["verifier"]["timestep"]
     it = nearest(entry["interval"][0] + np.arange(Z_all.shape[0]) * hj_dt, t)
     Z = Z_all[it]
@@ -170,7 +170,7 @@ def main():
 
     with open(a.data, "rb") as f:
         data = pickle.load(f)
-    for key in ("pred_path", "local_xy"):
+    for key in ("pred_path", "short_xy"):
         if key not in data:
             raise SystemExit(f"'{key}' missing in {a.data}: run the simulation again "
                              "(older runs did not save it)")
