@@ -7,8 +7,8 @@ Paper figures from a saved run (results/run_data.pkl, written by Animation.save_
                      used by the MPC, over the first T_MAX seconds
 
 Usage:
-    python3 plot_paper.py                      # results/run_data.pkl -> results/paper/
-    python3 plot_paper.py --data other.pkl --tmax 10
+    python3 plots/plot_paper.py                      # results/run_data.pkl -> results/paper/
+    python3 plots/plot_paper.py --data other.pkl --tmax 10
 """
 import argparse
 import os

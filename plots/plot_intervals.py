@@ -12,8 +12,8 @@ with subscript l (long horizon) or s (short horizon). The durations are illustra
 not taken from a run.
 
 Usage:
-    python3 plot_intervals.py                 # -> results/paper/intervals.pdf / .png
-    python3 plot_intervals.py --fs 13 --width 3.5
+    python3 plots/plot_intervals.py                 # -> results/paper/intervals.pdf / .png
+    python3 plots/plot_intervals.py --fs 13 --width 3.5
 """
 import argparse
 import os

@@ -9,10 +9,10 @@ zero level set is drawn as an isosurface in (x, y, t), as impl.plot(..., axes=('
 does in the notebooks. Static obstacles and the target are drawn as boxes over the horizon.
 
 Usage:
-    python plot_global_phi.py                        # min over (yaw, vel)
-    python plot_global_phi.py --proj slice --yaw 0 --vel 0
-    python plot_global_phi.py --recompute            # ignore the cached set
-    SCENARIO=corridor python plot_global_phi.py
+    python3 plots/plot_global_phi.py                        # min over (yaw, vel)
+    python3 plots/plot_global_phi.py --proj slice --yaw 0 --vel 0
+    python3 plots/plot_global_phi.py --recompute            # ignore the cached set
+    SCENARIO=corridor python3 plots/plot_global_phi.py
 
 Outputs in results/paper/: global0_<scenario>.npz (cache), global0_<scenario>_<proj>.html,
 and .pdf/.png if kaleido is installed (pip install kaleido).
@@ -28,8 +28,12 @@ jax.config.update("jax_platform_name", "cpu")
 import numpy as np
 import plotly.graph_objects as go
 
-PYSPECT_SRC = "/home/veronica/Projects/pyspect/src"
-if PYSPECT_SRC not in sys.path:
+# Run from the repository root (python3 plots/<script>.py): make the simulation modules
+# (config, verifier, obstacles, ...) importable from this subfolder
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Optional: a local pyspect checkout (otherwise the pip-installed package is used)
+PYSPECT_SRC = os.environ.get("PYSPECT_SRC")
+if PYSPECT_SRC and PYSPECT_SRC not in sys.path:
     sys.path.append(PYSPECT_SRC)
 
 from pyspect import *  # noqa: E402,F403

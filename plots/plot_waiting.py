@@ -15,13 +15,14 @@ Input: results/run_data.pkl (Animation.save_run_data) and the set files it point
 (sets/data_<k>.npy), so run it from the directory the simulation ran in, or pass --root.
 
 Usage:
-    python3 plot_waiting.py --list                # per-step table while stopped (choose times)
-    python3 plot_waiting.py                       # times picked automatically
-    python3 plot_waiting.py --times 14.2 15.5 15.6 18.0 --xlim 55 95
+    python3 plots/plot_waiting.py --list                # per-step table while stopped (choose times)
+    python3 plots/plot_waiting.py                       # times picked automatically
+    python3 plots/plot_waiting.py --times 14.2 15.5 15.6 18.0 --xlim 55 95
 """
 import argparse
 import os
 import pickle
+import sys
 
 import numpy as np
 import matplotlib
@@ -29,6 +30,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from scipy.ndimage import zoom
+
+# Run from the repository root (python3 plots/<script>.py): make the simulation modules
+# (config, verifier, obstacles, ...) importable from this subfolder
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from obstacles import obstacle_rects
 from plot_paper import C_SHORT, INK, INK2, GRID, SYM_LONG, SYM_SHORT, tint, _save  # paper style

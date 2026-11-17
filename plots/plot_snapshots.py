@@ -14,12 +14,13 @@ scenario looks the same; the fonts and the snapshot lines are sized for the widt
 figure has in the paper (--paper-width, in): --fs is the font size in the paper (pt).
 
 Usage:
-    python3 plot_snapshots.py --times 6 14            # results/run_data.pkl -> results/paper/snapshots
-    python3 plot_snapshots.py --times 6 14 --static   # scenario without the crossing road users
+    python3 plots/plot_snapshots.py --times 6 14            # results/run_data.pkl -> results/paper/snapshots
+    python3 plots/plot_snapshots.py --times 6 14 --static   # scenario without the crossing road users
 """
 import argparse
 import os
 import pickle
+import sys
 
 import numpy as np
 import matplotlib
@@ -28,6 +29,10 @@ if __name__ == "__main__":
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+
+# Run from the repository root (python3 plots/<script>.py): make the simulation modules
+# (config, verifier, obstacles, ...) importable from this subfolder
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import urban_scene as us
 from obstacles import obstacle_rects

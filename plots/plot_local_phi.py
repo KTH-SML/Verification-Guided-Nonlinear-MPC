@@ -13,9 +13,9 @@ vel (or sliced), and the zero level set is drawn in (x, y, t). The moving obstac
 with their physical footprint as solids in (x, y, t) (slanted: they move along y).
 
 Usage:
-    python plot_local_phi.py              # local set 1, window [1, 3] s (crossing car 1)
-    python plot_local_phi.py --k 0        # local set 0, window [0, 2] s
-    python plot_local_phi.py --proj slice --yaw 0 --vel 5
+    python3 plots/plot_local_phi.py              # local set 1, window [1, 3] s (crossing car 1)
+    python3 plots/plot_local_phi.py --k 0        # local set 0, window [0, 2] s
+    python3 plots/plot_local_phi.py --proj slice --yaw 0 --vel 5
 
 Outputs in results/paper/: local<k>_<scenario>.npz (cache), local<k>_<scenario>_<proj>.html
 and .pdf/.png if kaleido is installed. Needs results/paper/global0_<scenario>.npz (computed

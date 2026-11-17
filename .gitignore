@@ -1,20 +1,28 @@
-.vscode/
-acados/
+# Python
 __pycache__/
+
+# Editor / tools
+.vscode/
 .claude/
+
+# acados (local install and generated solver code)
+acados/
 c_generated_code/
-sets/
-vf_debug/
+codegen_ocp_*/
 acados_ocp.json
-timeline.png
-vf_debug.gif
-Bicycle4D_*
 acados_*
 libacados_*
+Bicycle4D_*
+main_ocp_*
+Makefile
 *.so
 *.o
-c_generated_code/
-Makefile
-main_ocp_*
-*.npy
+
+# Simulation outputs
+results/
+sets/
 vf_debug/
+vf_debug.gif
+timeline.png
+*.npy
+*.pkl
