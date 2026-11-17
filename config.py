@@ -36,7 +36,9 @@ HJ_LOCAL_PERIOD = 0.8  # s, fixed time between the starts of consecutive local w
 #   'reach'      : box reachable from the current state in HJ_DELAY + HJ_PREDICTION
 #                  with worst-case speeds (fixed size, centred on the vehicle)
 #   'zero_level' : bounding box of the global zero sublevel set over the local window
-#                  (the local set is contained in it; size recomputed at every iteration)
+#                  (the local set is contained in it). The size is set by the first set and
+#                  kept afterwards: an axis only grows when the needed box does not fit
+#                  (fewer shapes -> fewer JIT compilations)
 # Per-set statistics are written to results/crop_<method>.csv.
 HJ_CROP_METHOD = 'zero_level'
 HJ_CROP_AXES   = ('x', 'y', '*yaw', 'vel')   # axes to crop (names as in AXES)
@@ -75,7 +77,7 @@ Qhj          = 1.0        # cost weight for the time-to-reach (progress) map
 # safe solution exists, but the solver does not break on small violations.
 # SAFETY_MARGIN (extra margin on the value function, m): see the scenarios below
 SAFETY_SLACK_L1 = 1e3     # linear penalty on the slack
-SAFETY_SLACK_L2 = 0     # quadratic penalty on the slack
+SAFETY_SLACK_L2 = 1e2     # quadratic penalty on the slack
 
 # Local value function used by the safety constraint:
 #   'state' : V_l(t, x, y, yaw, vel) at the predicted state (sufficient for safety)
@@ -84,7 +86,7 @@ SAFETY_SLACK_L2 = 0     # quadratic penalty on the slack
 #             heading/speed is safe at that position, not necessarily the vehicle's own
 #             (e.g. too fast to stop before a crossing pedestrian), and it gives no
 #             gradient in yaw and vel.
-SAFETY_V_MODE   = 'min'
+SAFETY_V_MODE   = 'state'
 
 # ------------------------------------------------------------------
 # Scenario definitions
@@ -165,11 +167,11 @@ elif SCENARIO == 'urban_road':
     # Urban driving (30 km/h zone). The verifier assumes less control authority
     # than the MPC uses, as in the corridor scenario.
     MAX_VEL_VERIFIER   = 6.0    # m/s (28.8 km/h)
-    MAX_ACCEL_VERIFIER = 10.0    # m/s^2
+    MAX_ACCEL_VERIFIER = 4.0    # m/s^2
     MAX_STEER_VERIFIER = 0.5     # rad (~29 deg at the wheels)
-    MAX_VEL_MPC        = 7.0    # m/s, must not exceed the HJ velocity grid
-    MAX_ACCEL_MPC      = 12.0    # m/s^2 (comfortable braking / acceleration)
-    MAX_STEER_MPC      = 0.6    # rad
+    MAX_VEL_MPC        = 6.0    # m/s, must not exceed the HJ velocity grid
+    MAX_ACCEL_MPC      = 4.0    # m/s^2 (comfortable braking / acceleration)
+    MAX_STEER_MPC      = 0.5    # rad
 
     # Window: MAX_VEL * (T_G + T_U + HJ_PREDICTION) = 8 * 5 = 40 m <= WINDOW_W - WINDOW_BACK = 42 m.
     # The window covers the whole road width.
@@ -207,7 +209,7 @@ elif SCENARIO == 'urban_road':
     ]
     # Stop in the right lane past the last crosswalk (rear axle in the box, vel = 0)
     GOAL = (110.0, Y_RIGHT, 5.0, LANE_WIDTH)          # whole right lane
-    # Band of the global target: right lane only (direction of travel)
+    # Band of the global target: right lane only (direction of travel). None: whole road
     GLOBAL_TARGET_Y = (Y_RIGHT, Y_CENTRE)
 
     # Road users crossing the whole road (y in [0, YW]) at different places and times
@@ -218,7 +220,7 @@ elif SCENARIO == 'urban_road':
     DYN_OBSTACLES = [
         dict(name='crossing car 1', speed=5.0, width=1.8, length=4.5,
              center_x=22.0, between_y=ROAD, crossings=[(1.0, +1)]),    # intersection, right to left
-        dict(name='pedestrian',     speed=1.5, width=0.6, length=0.6,
+        dict(name='pedestrian',     speed=1.0, width=0.6, length=0.6,
              center_x=50.0, between_y=ROAD, crossings=[(3.0, -1)]),    # zebra crossing, left to right
         dict(name='tram',           speed=6.0, width=2.65, length=30.0,
              center_x=84.0, between_y=ROAD, crossings=[(8.0, +1)]),    # tram line, right to left

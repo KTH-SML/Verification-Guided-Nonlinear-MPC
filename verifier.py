@@ -658,13 +658,14 @@ class Verifier:
 
         One impl is kept per box shape (self.crop_impls): the jitted solver is compiled
         the first time a shape appears and reused afterwards. 'reach' always has the same
-        shape (one compilation), 'zero_level' changes shape between iterations.
+        shape (one compilation), 'zero_level' keeps its size and only grows (see _keep_size).
         """
         if self.CROP_METHOD not in self.CROP_METHODS:
             raise ValueError(f"crop_method must be one of {self.CROP_METHODS}, got {self.CROP_METHOD!r}")
         self.crop_dynamics = dynamics
         self.crop_impls = {}     # box shape (n_x, n_y, n_yaw, n_vel) -> TVHJImpl
         self.impl_crop = None
+        self.crop_shape = None   # 'zero_level': box size kept between iterations (see _keep_size)
         self.coords = [np.asarray(c) for c in self.impl.grid.coordinate_vectors]
         self.crop_idx = [np.arange(len(c)) for c in self.coords]
 
@@ -693,8 +694,33 @@ class Verifier:
         if self.CROP_METHOD == 'reach':
             return self._box_reach(state)
         if self.CROP_METHOD == 'zero_level':
-            return self._box_zero_level(t_start, t_end)
+            box = self._box_zero_level(t_start, t_end)
+            return None if box is None else self._keep_size(box)
         return [(0, len(c)) for c in self.coords]          # 'none': whole window
+
+    def _keep_size(self, box):
+        """
+        'zero_level' with a size that never shrinks: the first box sets the size; later
+        boxes keep it along every axis where the needed box fits, and grow only the axes
+        where it does not (size = max(previous, needed)). The box of that size is centred
+        on the needed one and shifted to stay inside the window, so it always contains it.
+        The shape changes (and the solver is JIT-compiled) only when an axis grows.
+        """
+        if self.crop_shape is None:
+            self.crop_shape = [n for _, n in box]
+            return box
+        out = []
+        for k, ((j0, m), n_prev) in enumerate(zip(box, self.crop_shape)):
+            N = len(self.coords[k])
+            n = min(N, max(m, n_prev))
+            if n == N:
+                out.append((0, N))
+            elif self.impl.axis_is_periodic(k + 1):
+                out.append((j0 - (n - m) // 2, n))      # may wrap around (see update_crop)
+            else:
+                out.append((int(np.clip(j0 - (n - m) // 2, 0, N - n)), n))
+        self.crop_shape = [n for _, n in out]
+        return out
 
     def _box_reach(self, state):
         """
